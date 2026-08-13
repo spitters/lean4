@@ -230,6 +230,19 @@ void event_loop_cancel_requests(event_loop_t * event_loop) {
     }
 }
 
+// Number of requests still outstanding. The teardown drain uses it to tell "a worker is stuck" from
+// "the backlog is still draining", so it may be called without the loop lock: by then the requesters
+// are locked out and the completions that unregister run on the draining thread itself.
+size_t event_loop_pending_requests(event_loop_t * event_loop) {
+    size_t count = 0;
+
+    for (uv_pending_req * pending = event_loop->requests; pending != nullptr; pending = pending->next) {
+        count++;
+    }
+
+    return count;
+}
+
 // Abandons the requests that outlived the teardown drain, returning whether there were any.
 //
 // Their `uv_req_t`s stay allocated: a threadpool worker still owns the memory and will write to it,

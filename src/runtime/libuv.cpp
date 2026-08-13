@@ -20,9 +20,16 @@ namespace lean {
 
 static std::unique_ptr<lthread> g_libuv_thread;
 
-// How long `finalize_libuv` waits for outstanding threadpool requests before abandoning them. Only
-// reached when a request is stuck in an uninterruptible syscall; the common case exits immediately.
-static constexpr uint64_t LEAN_UV_TEARDOWN_DRAIN_NS = 100ull * 1000ull * 1000ull;
+// How long `finalize_libuv` waits for a threadpool request to make progress before abandoning what
+// is left. Only reached when a request is stuck in an uninterruptible syscall; the common case exits
+// immediately. The clock restarts every time a request completes, so a backlog that is draining
+// steadily is followed to the end rather than abandoned partway through, and this bounds how long
+// teardown waits on a worker that never returns rather than how long the drain may take overall.
+static constexpr uint64_t LEAN_UV_TEARDOWN_IDLE_NS = 100ull * 1000ull * 1000ull;
+
+// Ceiling on the whole drain, so that a long queue of individually slow requests cannot hold exit
+// open for `LEAN_UV_TEARDOWN_IDLE_NS` per request.
+static constexpr uint64_t LEAN_UV_TEARDOWN_MAX_NS = 1000ull * 1000ull * 1000ull;
 
 extern "C" void initialize_libuv() {
     initialize_libuv_timer();
@@ -115,14 +122,29 @@ extern "C" void finalize_libuv() {
     // only one that touches `loop`.
     event_loop_unlock(&global_ev);
 
-    uint64_t const deadline = uv_hrtime() + LEAN_UV_TEARDOWN_DRAIN_NS;
+    uint64_t const hard_deadline = uv_hrtime() + LEAN_UV_TEARDOWN_MAX_NS;
+    uint64_t idle_deadline = uv_hrtime() + LEAN_UV_TEARDOWN_IDLE_NS;
+    size_t pending = event_loop_pending_requests(&global_ev);
 
     // The first pass runs the close callbacks the walk queued, and the requests `uv_cancel` reached.
     // Anything that survives it is a threadpool request whose worker has to finish on its own, so
     // the poll below is only ever reached in that case and sleeping between passes costs nothing in
     // the common one.
+    //
+    // Everything reaped here frees its own request and lets the loop be closed at the end, so the
+    // drain follows a shrinking backlog rather than stopping at a fixed budget: only a stall that
+    // outlasts `LEAN_UV_TEARDOWN_IDLE_NS`, or a drain that outlasts `LEAN_UV_TEARDOWN_MAX_NS` in
+    // total, gives up on what is left.
     while (uv_run(global_ev.loop, UV_RUN_NOWAIT) != 0) {
-        if (uv_hrtime() >= deadline) {
+        uint64_t const now = uv_hrtime();
+        size_t const remaining = event_loop_pending_requests(&global_ev);
+
+        if (remaining < pending) {
+            pending = remaining;
+            idle_deadline = now + LEAN_UV_TEARDOWN_IDLE_NS;
+        }
+
+        if (now >= idle_deadline || now >= hard_deadline) {
             break;
         }
 
