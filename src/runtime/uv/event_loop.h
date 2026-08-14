@@ -103,7 +103,6 @@ bool event_loop_lock(event_loop_t *event_loop);
 void event_loop_lock_internal(event_loop_t *event_loop);
 void event_loop_unlock(event_loop_t *event_loop);
 void event_loop_request_stop(event_loop_t *event_loop);
-void event_loop_begin_teardown();
 void event_loop_mark_finalized(event_loop_t *event_loop);
 void event_loop_wait_finalized(event_loop_t *event_loop);
 lean_obj_res lean_uv_loop_unavailable_error();
