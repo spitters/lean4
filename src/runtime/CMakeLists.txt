@@ -95,6 +95,24 @@ set(
   openssl.cpp
 )
 
+# CATCRYPT VERIFIED MPN: link the verified u32 mpn kernels (emitted via the
+# CatCrypt-Lean Lean -> Jasmin -> jasminc pipeline).  Path is configurable via
+# -DCATCRYPT_MPN_DIR=...; defaults to the standard tree layout where the lean4
+# checkout is a sibling of the CatCrypt-Lean repo.  See
+# bench/integration32/INTEGRATION.md (in the CatCrypt-Lean repo).
+if(NOT DEFINED CATCRYPT_MPN_DIR)
+  set(CATCRYPT_MPN_DIR "$ENV{HOME}/Claude/SSProve-lean/bench/integration32")
+endif()
+set(CATCRYPT_MPN_OBJS
+  "${CATCRYPT_MPN_DIR}/mpn_add_n_32.o"
+  "${CATCRYPT_MPN_DIR}/mpn_sub_n_32.o"
+  "${CATCRYPT_MPN_DIR}/mpn_and_n_32.o"
+  "${CATCRYPT_MPN_DIR}/mpn_ior_n_32.o"
+  "${CATCRYPT_MPN_DIR}/mpn_xor_n_32.o"
+)
+set_source_files_properties(${CATCRYPT_MPN_OBJS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED FALSE)
+list(APPEND RUNTIME_OBJS ${CATCRYPT_MPN_OBJS})
+
 add_library(leanrt_initial-exec STATIC ${RUNTIME_OBJS})
 set_target_properties(leanrt_initial-exec PROPERTIES ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 

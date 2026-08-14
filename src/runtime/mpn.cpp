@@ -17,11 +17,23 @@ Revision History:
 
 --*/
 #include <stdint.h>
+#include <string.h>
 #include "runtime/mpn.h"
 #include "runtime/debug.h"
 #include "runtime/buffer.h"
 
 #define max(a,b)    (((a) > (b)) ? (a) : (b))
+
+// CATCRYPT VERIFIED MPN: U32 verified kernels emitted by the CatCrypt
+// Lean -> Jasmin -> jasminc pipeline.  Route (a) of the USE_GMP=OFF width
+// fork.  See bench/integration32/ in the CatCrypt-Lean repo.  Only add/sub
+// are wired here; mul/compare/div/to_string keep the legacy z3 code below.
+extern "C" {
+    void mpn_add_n_oc_32(unsigned int *op, const unsigned int *ap,
+                         const unsigned int *bp, uint64_t n);
+    void mpn_sub_n_oc_32(unsigned int *op, const unsigned int *ap,
+                         const unsigned int *bp, uint64_t n);
+}
 
 namespace lean {
 
@@ -29,6 +41,10 @@ typedef uint64_t mpn_double_digit;
 static_assert(sizeof(mpn_double_digit) == 2 * sizeof(mpn_digit), "size alignment");
 
 static const mpn_digit zero = 0;
+
+// CATCRYPT VERIFIED MPN: scratch capacity for zero-extension (in u32 limbs).
+// Conformance suite tested up to 64 limbs; bump if a stress test exceeds this.
+#define CATCRYPT_MPN_MAXEXT 4096
 
 int mpn_compare(mpn_digit const * a, size_t const lnga,
                 mpn_digit const * b, size_t const lngb) {
@@ -46,44 +62,50 @@ int mpn_compare(mpn_digit const * a, size_t const lnga,
     return res;
 }
 
+// CATCRYPT VERIFIED MPN: mpn_add now delegates to the verified u32 kernel
+// `mpn_add_n_oc_32` via the zero-extend trick (m+1 equal-length add captures
+// the carry in the top limb; *plngc trimmed to >= 1).  Faithful to the legacy
+// behavior (n output limbs + normalized length).  See `bench/integration32/`.
 void  mpn_add(mpn_digit const * a, size_t const lnga,
               mpn_digit const * b, size_t const lngb,
               mpn_digit * c, size_t const lngc_alloc,
               size_t * plngc) {
-    // Essentially Knuth's Algorithm A
     size_t len = max(lnga, lngb);
     lean_assert(lngc_alloc == len+1 && len > 0);
-    mpn_digit k = 0;
-    mpn_digit r;
-    bool c1, c2;
-    for (size_t j = 0; j < len; j++) {
-        mpn_digit const & u_j = (j < lnga) ? a[j] : zero;
-        mpn_digit const & v_j = (j < lngb) ? b[j] : zero;
-        r = u_j + v_j; c1 = r < u_j;
-        c[j] = r + k;  c2 = c[j] < r;
-        k = c1 | c2;
-    }
-    c[len] = k;
+    size_t ext = len + 1;
+    lean_assert(ext <= CATCRYPT_MPN_MAXEXT);
+    mpn_digit ea[CATCRYPT_MPN_MAXEXT];
+    mpn_digit eb[CATCRYPT_MPN_MAXEXT];
+    memset(ea, 0, ext * sizeof(mpn_digit));
+    memset(eb, 0, ext * sizeof(mpn_digit));
+    for (size_t i = 0; i < lnga && i < ext; i++) ea[i] = a[i];
+    for (size_t i = 0; i < lngb && i < ext; i++) eb[i] = b[i];
+    mpn_add_n_oc_32(c, ea, eb, (uint64_t)ext);
     size_t &os = *plngc;
-    for (os = len+1; os > 1 && c[os-1] == 0; ) os--;
-    lean_assert(os > 0 && os <= len+1);
+    for (os = ext; os > 1 && c[os-1] == 0; ) os--;
+    lean_assert(os > 0 && os <= ext);
 }
 
+// CATCRYPT VERIFIED MPN: mpn_sub now delegates to the verified u32 kernel
+// `mpn_sub_n_oc_32` via the zero-extend trick (m+1 equal-length sub leaves the
+// borrow in the top limb).  Writes len limbs to c; *pborrow is the recovered
+// borrow.  Faithful to the legacy behavior.  See `bench/integration32/`.
 void mpn_sub(mpn_digit const * a, size_t const lnga,
              mpn_digit const * b, size_t const lngb,
              mpn_digit * c, mpn_digit * pborrow) {
-    // Essentially Knuth's Algorithm S
     size_t len = max(lnga, lngb);
-    mpn_digit & k = *pborrow; k = 0;
-    mpn_digit r;
-    bool c1, c2;
-    for (size_t j = 0; j < len; j++) {
-        mpn_digit const & u_j = (j < lnga) ? a[j] : zero;
-        mpn_digit const & v_j = (j < lngb) ? b[j] : zero;
-        r = u_j - v_j; c1 = r > u_j;
-        c[j] = r - k;  c2 = c[j] > r;
-        k = c1 | c2;
-    }
+    size_t ext = len + 1;
+    lean_assert(ext <= CATCRYPT_MPN_MAXEXT);
+    mpn_digit ea[CATCRYPT_MPN_MAXEXT];
+    mpn_digit eb[CATCRYPT_MPN_MAXEXT];
+    mpn_digit res[CATCRYPT_MPN_MAXEXT];
+    memset(ea, 0, ext * sizeof(mpn_digit));
+    memset(eb, 0, ext * sizeof(mpn_digit));
+    for (size_t i = 0; i < lnga && i < ext; i++) ea[i] = a[i];
+    for (size_t i = 0; i < lngb && i < ext; i++) eb[i] = b[i];
+    mpn_sub_n_oc_32(res, ea, eb, (uint64_t)ext);
+    memcpy(c, res, len * sizeof(mpn_digit));
+    *pborrow = (res[len] != 0) ? (mpn_digit)1 : (mpn_digit)0;
 }
 
 void mpn_mul(mpn_digit const * a, size_t const lnga,
