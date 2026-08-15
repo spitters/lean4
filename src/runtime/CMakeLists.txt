@@ -95,23 +95,19 @@ set(
   openssl.cpp
 )
 
-# CATCRYPT VERIFIED MPN: link the verified u32 mpn kernels (emitted via the
-# CatCrypt-Lean Lean -> Jasmin -> jasminc pipeline).  Path is configurable via
-# -DCATCRYPT_MPN_DIR=...; defaults to the standard tree layout where the lean4
-# checkout is a sibling of the CatCrypt-Lean repo.  See
-# bench/integration32/INTEGRATION.md (in the CatCrypt-Lean repo).
-if(NOT DEFINED CATCRYPT_MPN_DIR)
-  set(CATCRYPT_MPN_DIR "$ENV{HOME}/Claude/SSProve-lean/bench/integration32")
+# CATCRYPT VERIFIED MPN: mpn_add/mpn_sub delegate (mpn.cpp) to the verified
+# kernels mpn_{add,sub}_n_oc_32, linked from the catcrypt-mpn staticlib
+# libcatcrypt_mpn.a. Those symbols are backed by the u64 add/sub limb loops the
+# CatCrypt compiler's OWN verified byte encoder produces (no jasminc, no
+# assembler on the artifact path), presented at the u32 mpn surface by a small
+# safe-Rust seam. Build the archive no_std so it pulls no Rust std runtime:
+#   cargo build --release --no-default-features \
+#     --manifest-path <catcrypt>/crates/catcrypt-mpn/Cargo.toml
+# See CATCRYPT_MPN_TCB.md for the trust-base accounting. Path override:
+# -DCATCRYPT_MPN_LIB=/abs/path/to/libcatcrypt_mpn.a.
+if(NOT DEFINED CATCRYPT_MPN_LIB)
+  set(CATCRYPT_MPN_LIB "$ENV{HOME}/Claude/SSProve-lean/crates/catcrypt-mpn/target/release/libcatcrypt_mpn.a")
 endif()
-set(CATCRYPT_MPN_OBJS
-  "${CATCRYPT_MPN_DIR}/mpn_add_n_32.o"
-  "${CATCRYPT_MPN_DIR}/mpn_sub_n_32.o"
-  "${CATCRYPT_MPN_DIR}/mpn_and_n_32.o"
-  "${CATCRYPT_MPN_DIR}/mpn_ior_n_32.o"
-  "${CATCRYPT_MPN_DIR}/mpn_xor_n_32.o"
-)
-set_source_files_properties(${CATCRYPT_MPN_OBJS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED FALSE)
-list(APPEND RUNTIME_OBJS ${CATCRYPT_MPN_OBJS})
 
 add_library(leanrt_initial-exec STATIC ${RUNTIME_OBJS})
 set_target_properties(leanrt_initial-exec PROPERTIES ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
@@ -131,6 +127,16 @@ if(USE_MIMALLOC)
   target_link_libraries(leanrt_initial-exec PRIVATE mimalloc_initial-exec)
   target_link_libraries(leanrt PRIVATE mimalloc_local-exec)
 endif()
+
+# CATCRYPT VERIFIED MPN: propagate the verified-kernel archive as an interface
+# dependency of both runtime archives, so every target that links leanrt also
+# links libcatcrypt_mpn.a and resolves mpn_{add,sub}_n_oc_32. The archive is
+# no_std (see the comment above), so it needs only libc (memcpy/memset/abort)
+# and the compiler-rt intrinsics the C toolchain already provides.
+add_library(catcrypt_mpn STATIC IMPORTED GLOBAL)
+set_target_properties(catcrypt_mpn PROPERTIES IMPORTED_LOCATION "${CATCRYPT_MPN_LIB}")
+target_link_libraries(leanrt INTERFACE catcrypt_mpn)
+target_link_libraries(leanrt_initial-exec INTERFACE catcrypt_mpn)
 # We do not export Lean symbols when statically linking on Windows.
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
   target_compile_options(leanrt PRIVATE -ULEAN_EXPORTING)
