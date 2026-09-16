@@ -308,3 +308,58 @@ struct mpz_cmp_fn {
     int operator()(mpz const & v1, mpz const & v2) const { return cmp(v1, v2); }
 };
 }
+
+#ifndef LEAN_USE_GMP
+#include <atomic>
+#include <cstdint>
+
+/* CATCRYPT VERIFIED MPN: u32-digit entry points of the catcrypt-mpn static
+   archive (libcatcrypt_mpn.a), backed by u64 kernels emitted by the CatCrypt
+   compiler; see CATCRYPT_MPN_TCB.md. Lengths are in u32 limbs. In every entry
+   the output must not overlap an input; inputs may overlap each other; a
+   pointer may be null only when its length is zero. */
+extern "C" {
+/* op[0..n) = ap[0..n) op bp[0..n) mod 2^(32 n); carry/borrow dropped. */
+void mpn_add_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
+void mpn_sub_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
+/* op[i] = ap[i] & | ^ bp[i] for i < n. */
+void mpn_and_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
+void mpn_ior_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
+void mpn_xor_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
+/* Three-way comparison of the values ap[0..an) and bp[0..bn): 1, 0 or -1. */
+int mpn_cmp_oc_32(unsigned int const * ap, uint64_t an, unsigned int const * bp, uint64_t bn);
+/* rp[0 .. an + k/32 + 1) = ap[0..an) * 2^k, unnormalized. */
+void mpn_lshift_oc_32(unsigned int * rp, unsigned int const * ap, uint64_t an, uint64_t k);
+/* rp[0 .. an - k/32) = floor(ap[0..an) / 2^k), unnormalized; writes nothing
+   when k/32 >= an. */
+void mpn_rshift_oc_32(unsigned int * rp, unsigned int const * ap, uint64_t an, uint64_t k);
+/* rp[0 .. an + bn) = ap[0..an) * bp[0..bn), unnormalized. */
+void mpn_mul_oc_32(unsigned int * rp, unsigned int const * ap, uint64_t an,
+                   unsigned int const * bp, uint64_t bn);
+}
+
+namespace lean {
+/* CATCRYPT VERIFIED MPN: per-operation call counters. `routed` counts calls
+   that reach the archive, `legacy` calls that take the runtime's own digit
+   loop. Counting is enabled when the environment variable
+   LEAN_CATCRYPT_MPN_STATS is set at startup; the totals are printed to stderr
+   at process exit (atexit). When disabled, a call costs one load of
+   g_catcrypt_mpn_stats. Defined in mpn.cpp. */
+enum catcrypt_mpn_op {
+    CATCRYPT_MPN_ADD, CATCRYPT_MPN_SUB, CATCRYPT_MPN_CMP, CATCRYPT_MPN_MUL,
+    CATCRYPT_MPN_AND, CATCRYPT_MPN_IOR, CATCRYPT_MPN_XOR,
+    CATCRYPT_MPN_LSHIFT, CATCRYPT_MPN_RSHIFT,
+    CATCRYPT_MPN_NUM_OPS
+};
+extern bool g_catcrypt_mpn_stats;
+extern std::atomic<uint64_t> g_catcrypt_mpn_routed[CATCRYPT_MPN_NUM_OPS];
+extern std::atomic<uint64_t> g_catcrypt_mpn_legacy[CATCRYPT_MPN_NUM_OPS];
+
+inline void catcrypt_mpn_count(catcrypt_mpn_op op, bool routed) {
+    if (LEAN_UNLIKELY(g_catcrypt_mpn_stats)) {
+        (routed ? g_catcrypt_mpn_routed : g_catcrypt_mpn_legacy)[op]
+            .fetch_add(1, std::memory_order_relaxed);
+    }
+}
+}
+#endif

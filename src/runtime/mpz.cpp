@@ -890,9 +890,41 @@ size_t mpz::size_in_bytes() const {
     return m_size * sizeof(mpn_digit);
 }
 
+// CATCRYPT VERIFIED MPN: for non-negative operands, &=, |= and ^= compute the
+// common-length prefix with the archive's bitwise entry and extend it as the
+// zero-extended digit loop would: with zeros for &=, with the longer operand's
+// digits for |= and ^=. set() then normalizes exactly as in the loop version.
+// Negative operands take the loop version (which combines magnitudes).
+static void catcrypt_bitop(catcrypt_mpn_op op, mpn_digit * r,
+                           mpn_digit const * a, size_t la,
+                           mpn_digit const * b, size_t lb) {
+    size_t n = std::min(la, lb);
+    switch (op) {
+    case CATCRYPT_MPN_AND: mpn_and_n_oc_32(r, a, b, n); break;
+    case CATCRYPT_MPN_IOR: mpn_ior_n_oc_32(r, a, b, n); break;
+    default:               mpn_xor_n_oc_32(r, a, b, n); break;
+    }
+    size_t sz = std::max(la, lb);
+    if (sz == n) return;
+    if (op == CATCRYPT_MPN_AND) {
+        memset(r + n, 0, (sz - n) * sizeof(mpn_digit));
+    } else {
+        mpn_digit const * longer = la > lb ? a : b;
+        memcpy(r + n, longer + n, (sz - n) * sizeof(mpn_digit));
+    }
+}
+
 mpz & mpz::operator&=(mpz const & o) {
     digit_buffer r;
     size_t sz = std::max(m_size, o.m_size);
+    if (!m_sign && !o.m_sign) {
+        catcrypt_mpn_count(CATCRYPT_MPN_AND, true);
+        r.ensure_capacity(sz);
+        catcrypt_bitop(CATCRYPT_MPN_AND, r.begin(), m_digits, m_size, o.m_digits, o.m_size);
+        set(sz, r.begin());
+        return *this;
+    }
+    catcrypt_mpn_count(CATCRYPT_MPN_AND, false);
     r.ensure_capacity(sz);
     for (size_t i = 0; i < sz; i++) {
         mpn_digit u_i = (i < m_size)   ? m_digits[i]   : 0;
@@ -906,6 +938,14 @@ mpz & mpz::operator&=(mpz const & o) {
 mpz & mpz::operator|=(mpz const & o) {
     digit_buffer r;
     size_t sz = std::max(m_size, o.m_size);
+    if (!m_sign && !o.m_sign) {
+        catcrypt_mpn_count(CATCRYPT_MPN_IOR, true);
+        r.ensure_capacity(sz);
+        catcrypt_bitop(CATCRYPT_MPN_IOR, r.begin(), m_digits, m_size, o.m_digits, o.m_size);
+        set(sz, r.begin());
+        return *this;
+    }
+    catcrypt_mpn_count(CATCRYPT_MPN_IOR, false);
     r.ensure_capacity(sz);
     for (size_t i = 0; i < sz; i++) {
         mpn_digit u_i = (i < m_size)   ? m_digits[i]   : 0;
@@ -919,6 +959,14 @@ mpz & mpz::operator|=(mpz const & o) {
 mpz & mpz::operator^=(mpz const & o) {
     digit_buffer r;
     size_t sz = std::max(m_size, o.m_size);
+    if (!m_sign && !o.m_sign) {
+        catcrypt_mpn_count(CATCRYPT_MPN_XOR, true);
+        r.ensure_capacity(sz);
+        catcrypt_bitop(CATCRYPT_MPN_XOR, r.begin(), m_digits, m_size, o.m_digits, o.m_size);
+        set(sz, r.begin());
+        return *this;
+    }
+    catcrypt_mpn_count(CATCRYPT_MPN_XOR, false);
     r.ensure_capacity(sz);
     for (size_t i = 0; i < sz; i++) {
         mpn_digit u_i = (i < m_size)   ? m_digits[i]   : 0;
@@ -941,6 +989,16 @@ void mul2k(mpz & a, mpz const & b, unsigned k) {
     size_t   new_sz      = old_sz + word_shift + 1;
     digit_buffer ds;
     ds.ensure_capacity(new_sz);
+    // CATCRYPT VERIFIED MPN: for non-negative b, the archive's lshift entry
+    // writes the same new_sz digits as the loop below.
+    if (!b.m_sign) {
+        catcrypt_mpn_count(CATCRYPT_MPN_LSHIFT, true);
+        mpn_lshift_oc_32(ds.begin(), b.m_digits, b.m_size, k);
+        a.m_sign = false;
+        a.set(new_sz, ds.begin());
+        return;
+    }
+    catcrypt_mpn_count(CATCRYPT_MPN_LSHIFT, false);
     for (size_t i = 0; i < word_shift; i++) {
         ds.push_back(0);
     }
@@ -978,6 +1036,17 @@ void div2k(mpz & a, mpz const & b, unsigned k) {
     unsigned bit_shift  = k % (8 * sizeof(mpn_digit));
     unsigned comp_shift = (8 * sizeof(mpn_digit)) - bit_shift;
     digit_buffer ds;
+    // CATCRYPT VERIFIED MPN: for non-negative b, the archive's rshift entry
+    // writes the same new_sz digits as the loops below.
+    if (!b.m_sign) {
+        catcrypt_mpn_count(CATCRYPT_MPN_RSHIFT, true);
+        ds.ensure_capacity(new_sz);
+        mpn_rshift_oc_32(ds.begin(), b.m_digits, b.m_size, k);
+        a.m_sign = false;
+        a.set(new_sz, ds.begin());
+        return;
+    }
+    catcrypt_mpn_count(CATCRYPT_MPN_RSHIFT, false);
     ds.append(b.m_size, b.m_digits);
     if (new_sz < sz) {
         size_t i       = 0;

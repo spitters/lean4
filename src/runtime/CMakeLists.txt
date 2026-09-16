@@ -95,12 +95,11 @@ set(
   openssl.cpp
 )
 
-# CATCRYPT VERIFIED MPN: mpn_add/mpn_sub delegate (mpn.cpp) to the verified
-# kernels mpn_{add,sub}_n_oc_32, linked from the catcrypt-mpn staticlib
-# libcatcrypt_mpn.a. Those symbols are backed by the u64 add/sub limb loops the
-# CatCrypt compiler's OWN verified byte encoder produces (no jasminc, no
-# assembler on the artifact path), presented at the u32 mpn surface by a small
-# safe-Rust seam. Build the archive no_std so it pulls no Rust std runtime:
+# CATCRYPT VERIFIED MPN: mpn.cpp (add, sub, compare, mul) and mpz.cpp (&=, |=,
+# ^=, mul2k, div2k on non-negative operands) call the mpn_*_oc_32 entries of
+# the catcrypt-mpn staticlib libcatcrypt_mpn.a, which run u64 limb kernels
+# emitted by the CatCrypt compiler behind a safe-Rust u32 seam. Build the
+# archive no_std so it pulls no Rust std runtime:
 #   cargo build --release --no-default-features \
 #     --manifest-path <catcrypt>/crates/catcrypt-mpn/Cargo.toml
 # See CATCRYPT_MPN_TCB.md for the trust-base accounting. Path override:
@@ -130,9 +129,10 @@ endif()
 
 # CATCRYPT VERIFIED MPN: propagate the verified-kernel archive as an interface
 # dependency of both runtime archives, so every target that links leanrt also
-# links libcatcrypt_mpn.a and resolves mpn_{add,sub}_n_oc_32. The archive is
-# no_std (see the comment above), so it needs only libc (memcpy/memset/abort)
-# and the compiler-rt intrinsics the C toolchain already provides.
+# links libcatcrypt_mpn.a and resolves the mpn_*_oc_32 entries. The archive is
+# no_std (see the comment above), so it needs only libc
+# (memcpy/memset/calloc/free/abort) and the compiler-rt intrinsics the C
+# toolchain already provides.
 add_library(catcrypt_mpn STATIC IMPORTED GLOBAL)
 set_target_properties(catcrypt_mpn PROPERTIES IMPORTED_LOCATION "${CATCRYPT_MPN_LIB}")
 target_link_libraries(leanrt INTERFACE catcrypt_mpn)

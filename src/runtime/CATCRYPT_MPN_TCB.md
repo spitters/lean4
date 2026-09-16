@@ -1,72 +1,120 @@
 # CatCrypt verified `mpn`: trust-base accounting
 
-`src/runtime/mpn.cpp` routes the equal-length limb add and subtract —
-`lean::mpn_add` and `lean::mpn_sub`, the arithmetic hot path of `Nat`/`Int`
-bignum in a `USE_GMP=OFF` build — through the verified kernels
-`mpn_add_n_oc_32` / `mpn_sub_n_oc_32`, linked from the `catcrypt-mpn` static
-archive `libcatcrypt_mpn.a`. This note states exactly what that moves into and
-out of the trusted computing base.
+In a `USE_GMP=OFF` build, `src/runtime/mpn.cpp` and the non-GMP branch of
+`src/runtime/mpz.cpp` call entry points of the `catcrypt-mpn` static archive
+`libcatcrypt_mpn.a` for most of the bignum digit arithmetic behind `Nat` and
+`Int`. The archive runs x86-64 limb kernels emitted by the CatCrypt compiler.
+This note states which operations run on those kernels, what code sits between
+the runtime and the kernels, and what that code adds to the trusted computing
+base.
 
-## What runs
+## Operations
 
-`mpn_add`/`mpn_sub` zero-extend their two inputs to `m+1` equal-length u32
-limbs (capturing the carry/borrow in the top limb) and call the `_oc_32`
-kernel; the remaining `mpn` operations (`mpn_mul`, `mpn_div`, `mpn_compare`,
-`mpn_to_string`) keep the runtime's legacy C.
+| Runtime operation | Archive entry | Kernel (u64 limbs) |
+|---|---|---|
+| `mpn_add` | `mpn_add_n_oc_32` | `mpn_add_n_loop_owned` |
+| `mpn_sub` | `mpn_sub_n_oc_32` | `mpn_sub_n_loop_owned` |
+| `mpn_compare` | `mpn_cmp_oc_32` | `mpn_cmp_ct` |
+| `mpn_mul` | `mpn_mul_oc_32` | `mpn_mul_basecase_rt` |
+| `mpz::operator&=` (both operands ≥ 0) | `mpn_and_n_oc_32` | `mpn_and_n_loop_owned` |
+| `mpz::operator\|=` (both operands ≥ 0) | `mpn_ior_n_oc_32` | `mpn_ior_n_loop_owned` |
+| `mpz::operator^=` (both operands ≥ 0) | `mpn_xor_n_oc_32` | `mpn_xor_n_loop_owned` |
+| `mul2k` (operand ≥ 0) | `mpn_lshift_oc_32` | `mpn_shift_rt` |
+| `div2k` (operand ≥ 0) | `mpn_rshift_oc_32` | `mpn_shift_rt` |
 
-Inside the archive, `mpn_{add,sub}_n_oc_32` are a small **safe-Rust seam** over
-the u64 limb-loop kernels `mpn_{add,sub}_n_loop_owned`: the seam packs the u32
-limbs into u64 pairs, calls the u64 kernel, recovers the carry/borrow, and
-normalizes the length. The u64 kernels are the artifact the CatCrypt compiler
-emits.
+`mpn_div` keeps the runtime's own Knuth D code, but its normalization and
+correction steps call `mpn_mul`, `mpn_sub` and `mpn_add`, so those parts run on
+the kernels. `mpn_to_string` keeps the runtime's code. The bitwise operators
+and the shifts take the runtime's digit loops when an operand is negative; in
+the runtime these operators are reached only from `Nat` functions
+(`lean_nat_big_land`, `lean_nat_big_lor`, `lean_nat_big_xor`,
+`lean_nat_shiftl`, `lean_nat_big_shiftr`), whose operands are non-negative.
 
-## Kernel provenance — verified, not trusted
+Setting `LEAN_CATCRYPT_MPN_STATS` in the environment makes the runtime count,
+per operation, the calls that reach the archive and the calls that take the
+runtime's digit loop, and print both totals to stderr at exit.
 
-The u64 add/sub limb loops are **front-compiled** in Lean
-(`LowCT` → `catCryptDialect` → jasmin `Com` → `Lprog`, no hand-authored IR)
-and turned into ELF object bytes by CatCrypt's **own translation-validated byte
-encoder** (`X86Backend/LprogBytes.encodeLprogChecked`): no external assembler
-and **no `jasminc`** on the artifact path. The byte encoder's fragment
-membership is machine-checked at emit time. This is the change from the prior
-integration (`bench/integration32/*.o`), whose u32 kernels came through
-`jasminc` — an external compiler that was in the trust base and left no
-correctness theorem at u32. That path, and `jasminc`, are gone.
+## Kernel provenance
 
-## Trusted computing base after this change
+The five equal-length loops (`add`, `sub`, `and`, `ior`, `xor`) are
+front-compiled in Lean (`LowCT` → `catCryptDialect` → jasmin `Com` → `Lprog`)
+and turned into ELF object bytes by CatCrypt's translation-validated byte
+encoder (`X86Backend/LprogBytes.encodeLprogChecked`); neither an external
+assembler nor `jasminc` is on their artifact path.
 
-Trusted (unchanged bignum correctness still rests on these):
+The three runtime-trip kernels are front-compiled through the rolled-loop
+front (`MpnShiftFrontEmit.lean`, `MpnCmpFrontEmit.lean`,
+`MpnMulBasecaseFrontEmit.lean`) and rendered to AT&T text. The objects the
+archive currently holds for them (`obj/mpn_shift_rt_owned.o`,
+`obj/mpn_cmp_ct_owned.o`, `obj/mpn_mul_basecase_rt_owned.o`) are the GNU
+assembler's output for that text, so for these three the system assembler is
+in the trust base until the encoder-produced objects replace them under the
+same names. Those modules prove the word-level invariants (`shiftFold_val`,
+`cmpFold_val_full`, `bcFold_val`) and the denotation of the front-compiled loop
+program; identifying the front body's denotation with the word-level step is
+stated there as a separate source-preservation step.
 
-- The **safe-Rust seam** (`crates/catcrypt-mpn/src/lib.rs`, `seam`/`cabi`):
-  u32↔u64 packing, carry/borrow capture, and the normalization scan. Ordinary
-  data-independent code, `#![deny(unsafe_code)]` except the two FFI islands,
-  differential- and vector-tested (`tests/kat.rs`, 9 cases).
-- The `extern "C"` ABI between `mpn.cpp` and the archive, and the zero-extend
-  glue in `mpn.cpp` itself.
-- `rustc` (for the seam glue only), the system assembler and linker.
-- libc `memcpy`/`memset`/`abort` and the compiler-rt integer/float intrinsics
-  the C toolchain already provides. The archive is built `no_std`
-  (`--no-default-features`), so it pulls **no Rust std runtime** into the final
-  link — its only undefined symbols are those primitives.
-- Unchanged and still trusted: `mpn_mul`, `mpn_div`, `mpn_compare`,
-  `mpn_to_string` (the runtime's legacy C).
+The three runtime-trip kernels use BMI2 (`shlx`, `shrx`, `mulx`) and write
+below their adjusted stack pointer inside the SysV red zone. They leave the
+final loop index in `RAX`; the archive ignores that register and reads results
+through the output pointer.
 
-Removed from the trust base by this change:
+## Code between the runtime and the kernels
 
-- `jasminc` (the external Jasmin compiler) and the u32 emission path that had no
-  correctness theorem.
-- The hand-written C inner loops of `mpn_add`/`mpn_sub` that a stock
-  `USE_GMP=OFF` build would use.
+All of it is trusted and none of it is verified.
 
-## Not yet verified (honest limits)
+- `mpn.cpp` glue: `mpn_add`/`mpn_sub` copy both operands, zero-extended to
+  `len + 1` digits, into scratch (1024 digits of inline storage in a
+  `buffer`, heap above that; there is no length limit) and normalize the
+  result length; `mpn_sub` copies the result out of scratch, which makes the
+  in-place call in `mpn_div` safe. `mpn_compare`/`mpn_mul` forward directly.
+- `mpz.cpp` glue: the sign tests that select the archive, the zero/copy
+  extension of the bitwise result beyond the shorter operand, and the output
+  lengths passed to `set()`, which normalizes as before.
+- The Rust crate (`crates/catcrypt-mpn/src/lib.rs`), `#![deny(unsafe_code)]`
+  except three FFI islands:
+  - `mpn_ffi` (generated by `MpnCrateEmit.lean`) and `rt_ffi` (hand-written):
+    extern declarations and length-checked slice wrappers of the kernels.
+  - `seam` (safe): u32↔u64 packing (a `2p`-digit u32 array is the `p`-limb
+    u64 array over the same bytes; odd lengths are padded with a zero digit),
+    the whole-digit part of the shifts (a copy or a zero fill), the
+    `sh = 64 - cnt` reading of the shift kernel for right shifts, the scan of
+    the longer operand's excess digits in compare, and the zero products for
+    empty operands. Every step is bounds-checked; a violated check aborts.
+  - `cabi`: the `extern "C"` entries. They form slices from the runtime's
+    pointers (the runtime guarantees the output does not overlap an input),
+    zero the output before forming a slice over it, and provide the seam's
+    scratch: on the stack up to 512 u64 limbs, from `calloc`/`free` above.
+- `rustc` for the crate, the system linker, and libc (`memcpy`, `memset`,
+  `calloc`, `free`, `abort`) plus the compiler-rt intrinsics the C toolchain
+  already provides. The archive is built `no_std` with `panic = "abort"`, so
+  it adds no Rust std runtime to the link.
 
-- The seam and the `mpn.cpp` zero-extend glue are trusted, not verified. Each
-  seam step is its own function so a later verified-kernel replacement swaps one
-  call site; the u64 kernels are already the verified artifact.
-- The kernels are verified at **u64** limb width; the u32 mpn surface is served
-  by presenting them through the seam, not by a natively-u32 verified kernel.
-  Native u32 correctness (`Add32Refines` over `BitVec 32`) is a separate,
-  larger task.
-- `mpn_mul`/`mpn_div`/`mpn_compare` are unaffected and remain trusted C.
+## Removed from the trust base
+
+- `jasminc` and the earlier u32 emission path.
+- The runtime's hand-written digit loops for the operations in the table
+  (for the bitwise operators and shifts, on non-negative operands).
+
+## Testing
+
+- `cargo test` in the crate: fixed vectors and differential sweeps of the
+  kernels and of every u32 entry against schoolbook references
+  (`tests/kat.rs`, `tests/seam_diff.rs`), including operands above 4096
+  digits and the heap scratch path.
+- `make -C crates/catcrypt-mpn/tests/cpp check`: compiles this directory's
+  `mpn.cpp` and `mpz.cpp` against the archive and compares `mpn_add`,
+  `mpn_sub`, `mpn_compare`, `mpn_mul`, `mpn_div` and the `mpz` operators
+  (including `&=`, `|=`, `^=`, `mul2k`, `div2k`) with the v4.33.1 sources on
+  identical deterministic inputs.
+
+## Limits
+
+- The glue and the Rust crate are trusted, not verified.
+- The kernels are verified at u64 limb width; the u32 digit surface is served
+  through the packing seam.
+- The three runtime-trip objects are assembler output (see above).
+- `mpn_div` and `mpn_to_string` remain the runtime's C.
 
 ## Build
 
@@ -77,6 +125,4 @@ cargo build --release --no-default-features \
 
 produces `target/release/libcatcrypt_mpn.a`. The runtime CMake links it via the
 `catcrypt_mpn` imported target (`src/runtime/CMakeLists.txt`); override the path
-with `-DCATCRYPT_MPN_LIB=`. `cargo test` (default `std` feature) runs the KAT
-harness; the archive the runtime links is the `no_std` `--no-default-features`
-build.
+with `-DCATCRYPT_MPN_LIB=`.
