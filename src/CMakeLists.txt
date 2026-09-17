@@ -530,6 +530,22 @@ else()
   )
 endif()
 
+# CATCRYPT VERIFIED MPN: the runtime's mpn.cpp and mpz.cpp call the
+# mpn_*_oc_32 entries of libcatcrypt_mpn.a (see runtime/CATCRYPT_MPN_TCB.md).
+# The runtime objects reach binaries through stdlib.make link lines, not through
+# CMake targets, so the archive is named there: after the runtime archive in
+# the libleanshared link (LEANSHARED_LINKER_FLAGS), and after -lleanrt in the
+# static flags, from a copy in lib/lean so that leanc and Lake find it.
+if(NOT DEFINED CATCRYPT_MPN_LIB)
+  set(CATCRYPT_MPN_LIB "$ENV{HOME}/Claude/SSProve-lean/crates/catcrypt-mpn/target/release/libcatcrypt_mpn.a")
+endif()
+if(NOT USE_GMP MATCHES "ON" AND CMAKE_SYSTEM_NAME MATCHES "Linux")
+  configure_file("${CATCRYPT_MPN_LIB}" "${CMAKE_BINARY_DIR}/lib/lean/libcatcrypt_mpn.a" COPYONLY)
+  string(APPEND LEANSHARED_LINKER_FLAGS " ${CMAKE_BINARY_DIR}/lib/lean/libcatcrypt_mpn.a")
+  string(REPLACE "-lInit -lleanrt -Wl,--end-group" "-lInit -lleanrt -lcatcrypt_mpn -Wl,--end-group"
+    TOOLCHAIN_STATIC_LINKER_FLAGS "${TOOLCHAIN_STATIC_LINKER_FLAGS}")
+endif()
+
 set(LEAN_CXX_STDLIB "-lstdc++" CACHE STRING "C++ stdlib linker flags")
 
 if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
