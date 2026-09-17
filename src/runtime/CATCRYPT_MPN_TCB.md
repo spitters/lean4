@@ -44,15 +44,16 @@ assembler nor `jasminc` is on their artifact path.
 
 The three runtime-trip kernels are front-compiled through the rolled-loop
 front (`MpnShiftFrontEmit.lean`, `MpnCmpFrontEmit.lean`,
-`MpnMulBasecaseFrontEmit.lean`) and rendered to AT&T text. The objects the
-archive currently holds for them (`obj/mpn_shift_rt_owned.o`,
-`obj/mpn_cmp_ct_owned.o`, `obj/mpn_mul_basecase_rt_owned.o`) are the GNU
-assembler's output for that text, so for these three the system assembler is
-in the trust base until the encoder-produced objects replace them under the
-same names. Those modules prove the word-level invariants (`shiftFold_val`,
-`cmpFold_val_full`, `bcFold_val`) and the denotation of the front-compiled loop
-program; identifying the front body's denotation with the word-level step is
-stated there as a separate source-preservation step.
+`MpnMulBasecaseFrontEmit.lean`) and encoded to ELF objects by the same byte
+encoder (`X86Backend/MpnRuntimeBytesEmit.lean`), from the unoptimized
+`toLprogPhysAbi` program. What is proved differs per kernel:
+
+- shift and compare: the machine execution of the emitted loop computes the
+  word-level contract (`MpnShiftLsemTie`, `MpnCmpLsemTie`, discharged in
+  `JasminLsemMemArrTripShift` and `JasminLsemMemArrTripCmp`);
+- multiply: the compiled program's denotation is the schoolbook product
+  (`MpnMulBasecaseFrontDenote.bcRtProg_val`); no theorem connects the machine
+  execution of the nested loop to that denotation.
 
 The three runtime-trip kernels use BMI2 (`shlx`, `shrx`, `mulx`) and write
 below their adjusted stack pointer inside the SysV red zone. They leave the
@@ -113,7 +114,7 @@ All of it is trusted and none of it is verified.
 - The glue and the Rust crate are trusted, not verified.
 - The kernels are verified at u64 limb width; the u32 digit surface is served
   through the packing seam.
-- The three runtime-trip objects are assembler output (see above).
+- The multiply kernel is verified to the program denotation only (see above).
 - `mpn_div` and `mpn_to_string` remain the runtime's C.
 
 ## Build
@@ -123,6 +124,8 @@ cargo build --release --no-default-features \
   --manifest-path <catcrypt>/crates/catcrypt-mpn/Cargo.toml
 ```
 
-produces `target/release/libcatcrypt_mpn.a`. The runtime CMake links it via the
-`catcrypt_mpn` imported target (`src/runtime/CMakeLists.txt`); override the path
-with `-DCATCRYPT_MPN_LIB=`.
+produces `target/release/libcatcrypt_mpn.a`. On Linux, `src/CMakeLists.txt`
+copies it to `lib/lean` at configure time and names it in the `libleanshared`
+link and in the static link flags that `leanc` and Lake use; override the path
+with `-DCATCRYPT_MPN_LIB=`. The copy is refreshed when CMake reconfigures, and
+a changed archive reaches `libleanshared` only after that library is relinked.
