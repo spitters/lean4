@@ -76,8 +76,14 @@ bool g_catcrypt_mpn_stats = catcrypt_mpn_stats_init();
 #define CATCRYPT_MPN_STACK_DIGITS 1024
 typedef buffer<mpn_digit, CATCRYPT_MPN_STACK_DIGITS> catcrypt_scratch;
 
+// CATCRYPT VERIFIED MPN: both operands must be normalized mpz digit arrays (at
+// least one digit, and a nonzero top digit unless the value is the single digit
+// 0), the form every caller in mpz.cpp passes. mpn_cmp_oc_32 then orders
+// operands of different lengths by length and aborts on an unnormalized one.
 int mpn_compare(mpn_digit const * a, size_t const lnga,
                 mpn_digit const * b, size_t const lngb) {
+    lean_assert(lnga > 0 && (lnga == 1 || a[lnga - 1] != 0));
+    lean_assert(lngb > 0 && (lngb == 1 || b[lngb - 1] != 0));
     catcrypt_mpn_count(CATCRYPT_MPN_CMP, true);
     return mpn_cmp_oc_32(a, (uint64_t)lnga, b, (uint64_t)lngb);
 }
