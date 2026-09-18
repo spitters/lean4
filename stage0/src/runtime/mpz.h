@@ -75,7 +75,7 @@ public:
 #ifdef LEAN_USE_GMP
         return static_cast<unsigned>(mpz_get_si(m_val));
 #else
-        return m_digits[0];
+        return static_cast<unsigned>(m_digits[0]);
 #endif
     }
 
@@ -308,3 +308,58 @@ struct mpz_cmp_fn {
     int operator()(mpz const & v1, mpz const & v2) const { return cmp(v1, v2); }
 };
 }
+
+#ifndef LEAN_USE_GMP
+#include <atomic>
+#include <cstdint>
+
+/* CATCRYPT VERIFIED MPN: the x86-64 limb kernels emitted and byte-encoded by
+   the CatCrypt compiler, linked from the ELF objects in runtime/catcrypt/; see
+   CATCRYPT_MPN_TCB.md. SysV calling convention; 64-bit limbs, little-endian.
+   The verified statements are over distinct arrays: an output never overlaps
+   an input, inputs may coincide. The kernels use BMI2 and the red zone. */
+extern "C" {
+/* rp[0..n) = ap[0..n) + bp[0..n) mod 2^(64 n). */
+uint64_t mpn_add_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+/* rp[0..n) = ap[0..n) - bp[0..n) mod 2^(64 n). */
+uint64_t mpn_sub_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+/* rp[i] = ap[i] & | ^ bp[i] for i < n. */
+void mpn_and_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+void mpn_ior_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+void mpn_xor_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+/* Funnel shift, 1 <= sh <= 63, rp[0] < 2^sh on entry:
+   value(rp[0..n]) = value(up[0..n)) * 2^sh + rp[0]. */
+void mpn_shift_rt(uint64_t * rp, uint64_t const * up, uint64_t n, uint64_t sh);
+/* rp[0] = 1, 0 or 2^64-1 as ap[0..n) >, =, < bp[0..n); rp[0] zero on entry. */
+void mpn_cmp_ct(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+/* un, vn >= 1, rp[0..un+vn] zero on entry:
+   value(rp[0..un+vn)) = value(up[0..un)) * value(vp[0..vn)), rp[un+vn] = 0. */
+void mpn_mul_basecase_rt(uint64_t * rp, uint64_t const * up, uint64_t const * vp,
+                         uint64_t un, uint64_t vn);
+}
+
+namespace lean {
+/* CATCRYPT VERIFIED MPN: per-operation call counters. `routed` counts calls
+   that reach the archive, `legacy` calls that take the runtime's own digit
+   loop. Counting is enabled when the environment variable
+   LEAN_CATCRYPT_MPN_STATS is set at startup; the totals are printed to stderr
+   at process exit (atexit). When disabled, a call costs one load of
+   g_catcrypt_mpn_stats. Defined in mpn.cpp. */
+enum catcrypt_mpn_op {
+    CATCRYPT_MPN_ADD, CATCRYPT_MPN_SUB, CATCRYPT_MPN_CMP, CATCRYPT_MPN_MUL,
+    CATCRYPT_MPN_AND, CATCRYPT_MPN_IOR, CATCRYPT_MPN_XOR,
+    CATCRYPT_MPN_LSHIFT, CATCRYPT_MPN_RSHIFT,
+    CATCRYPT_MPN_NUM_OPS
+};
+extern bool g_catcrypt_mpn_stats;
+extern std::atomic<uint64_t> g_catcrypt_mpn_routed[CATCRYPT_MPN_NUM_OPS];
+extern std::atomic<uint64_t> g_catcrypt_mpn_legacy[CATCRYPT_MPN_NUM_OPS];
+
+inline void catcrypt_mpn_count(catcrypt_mpn_op op, bool routed) {
+    if (LEAN_UNLIKELY(g_catcrypt_mpn_stats)) {
+        (routed ? g_catcrypt_mpn_routed : g_catcrypt_mpn_legacy)[op]
+            .fetch_add(1, std::memory_order_relaxed);
+    }
+}
+}
+#endif

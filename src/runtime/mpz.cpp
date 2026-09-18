@@ -396,16 +396,10 @@ void mpz::init_int(int v) {
 }
 
 void mpz::init_uint64(uint64 v) {
+    static_assert(sizeof(uint64) == sizeof(mpn_digit), "a uint64 is one digit");
     m_sign = false;
-    if (v <= std::numeric_limits<unsigned>::max()) {
-        allocate(1);
-        m_digits[0] = v;
-    } else {
-        static_assert(sizeof(uint64) == 2 * sizeof(unsigned), "unsigned should be half the size of an uint64");
-        allocate(2);
-        m_digits[0] = static_cast<mpn_digit>(v);
-        m_digits[1] = static_cast<mpn_digit>(v >> 8*sizeof(mpn_digit));
-    }
+    allocate(1);
+    m_digits[0] = v;
 }
 
 void mpz::init_int64(int64 v) {
@@ -487,41 +481,30 @@ bool mpz::is_int() const {
 }
 
 bool mpz::is_unsigned_int() const {
-    return m_size == 1 && !m_sign;
+    return m_size == 1 && !m_sign && m_digits[0] <= std::numeric_limits<unsigned>::max();
 }
 
 bool mpz::is_size_t() const {
-    if (sizeof(size_t) == 8) {
-        return m_size <= 2 && !m_sign;
-    } else {
-        return m_size == 1 && !m_sign;
-    }
+    return m_size == 1 && !m_sign && m_digits[0] <= std::numeric_limits<size_t>::max();
 }
 
 int mpz::get_int() const {
     lean_assert(is_int());
     if (m_sign) {
-        return -static_cast<int>(m_digits[0]);
+        return -static_cast<int>(static_cast<unsigned>(m_digits[0]));
     } else {
-        return m_digits[0];
+        return static_cast<int>(m_digits[0]);
     }
 }
 
 unsigned int mpz::get_unsigned_int() const {
     lean_assert(is_unsigned_int());
-    return m_digits[0];
+    return static_cast<unsigned>(m_digits[0]);
 }
 
 size_t mpz::get_size_t() const {
     lean_assert(is_size_t());
-    if (sizeof(size_t) == 8) {
-        if (m_size == 1)
-            return m_digits[0];
-        else
-            return m_digits[0] + (static_cast<size_t>(m_digits[1]) << 8*sizeof(mpn_digit));
-    } else {
-        return m_digits[0];
-    }
+    return static_cast<size_t>(m_digits[0]);
 }
 
 mpz & mpz::operator=(mpz const & v) {
@@ -574,14 +557,15 @@ int cmp(mpz const & a, unsigned b) {
     if (a.m_sign) {
         return -1;
     } else {
-        return mpn_compare(a.m_digits, a.m_size, &b, 1);
+        mpn_digit b1 = b;
+        return mpn_compare(a.m_digits, a.m_size, &b1, 1);
     }
 }
 
 int cmp(mpz const & a, int b) {
     if (a.m_sign) {
         if (b < 0) {
-            unsigned b1 = -static_cast<unsigned>(b);
+            mpn_digit b1 = -static_cast<unsigned>(b);
             return mpn_compare(&b1, 1, a.m_digits, a.m_size);
         } else {
             return -1;
@@ -590,7 +574,7 @@ int cmp(mpz const & a, int b) {
         if (b < 0) {
             return 1;
         } else {
-            unsigned b1 = b;
+            mpn_digit b1 = static_cast<unsigned>(b);
             return mpn_compare(a.m_digits, a.m_size, &b1, 1);
         }
     }
@@ -713,15 +697,16 @@ mpz & mpz::operator+=(mpz const & o) {
 }
 
 mpz & mpz::operator+=(unsigned u) {
-    return add(false, 1, &u);
+    mpn_digit u1 = u;
+    return add(false, 1, &u1);
 }
 
 mpz & mpz::operator+=(int u) {
     if (u < 0) {
-        unsigned u1 = -static_cast<unsigned>(u);
+        mpn_digit u1 = -static_cast<unsigned>(u);
         return add(true, 1, &u1);
     } else {
-        unsigned u1 = u;
+        mpn_digit u1 = static_cast<unsigned>(u);
         return add(false, 1, &u1);
     }
 }
@@ -731,15 +716,16 @@ mpz & mpz::operator-=(mpz const & o) {
 }
 
 mpz & mpz::operator-=(unsigned u) {
-    return add(true, 1, &u);
+    mpn_digit u1 = u;
+    return add(true, 1, &u1);
 }
 
 mpz & mpz::operator-=(int u) {
     if (u < 0) {
-        unsigned u1 = -static_cast<unsigned>(u);
+        mpn_digit u1 = -static_cast<unsigned>(u);
         return add(false, 1, &u1);
     } else {
-        unsigned u1 = u;
+        mpn_digit u1 = static_cast<unsigned>(u);
         return add(true, 1, &u1);
     }
 }
@@ -749,15 +735,16 @@ mpz & mpz::operator*=(mpz const & o) {
 }
 
 mpz & mpz::operator*=(unsigned u) {
-    return mul(false, 1, &u);
+    mpn_digit u1 = u;
+    return mul(false, 1, &u1);
 }
 
 mpz & mpz::operator*=(int u) {
     if (u < 0) {
-        unsigned u1 = -static_cast<unsigned>(u);
+        mpn_digit u1 = -static_cast<unsigned>(u);
         return mul(true, 1, &u1);
     } else {
-        unsigned u1 = u;
+        mpn_digit u1 = static_cast<unsigned>(u);
         return mul(false, 1, &u1);
     }
 }
@@ -767,7 +754,8 @@ mpz & mpz::operator/=(mpz const & o) {
 }
 
 mpz & mpz::operator/=(unsigned u) {
-    return div(false, 1, &u);
+    mpn_digit u1 = u;
+    return div(false, 1, &u1);
 }
 
 mpz & mpz::operator%=(mpz const & o) {
@@ -857,33 +845,13 @@ mpz mpz::powm(mpz const & exp, mpz const & m) const {
     return result;
 }
 
-static unsigned log2_uint(unsigned v) {
-    unsigned r = 0;
-    if (v & 0xFFFF0000) {
-        v >>= 16;
-        r |=  16;
-    }
-    if (v & 0xFF00) {
-        v >>= 8;
-        r |=  8;
-    }
-    if (v & 0xF0) {
-        v >>= 4;
-        r |=  4;
-    }
-    if (v & 0xC) {
-        v >>= 2;
-        r |=  2;
-    }
-    if (v & 0x2) {
-        v >>= 1;
-        r |=  1;
-    }
-    return r;
+// Index of the highest set bit of v, and 0 for v = 0.
+static unsigned log2_digit(mpn_digit v) {
+    return v == 0 ? 0 : 63 - static_cast<unsigned>(__builtin_clzll(v));
 }
 
 size_t mpz::log2() const {
-    return (m_size - 1)*sizeof(mpn_digit)*8 + log2_uint(m_digits[m_size - 1]);
+    return (m_size - 1)*sizeof(mpn_digit)*8 + log2_digit(m_digits[m_size - 1]);
 }
 
 size_t mpz::size_in_bytes() const {
@@ -900,9 +868,9 @@ static void catcrypt_bitop(catcrypt_mpn_op op, mpn_digit * r,
                            mpn_digit const * b, size_t lb) {
     size_t n = std::min(la, lb);
     switch (op) {
-    case CATCRYPT_MPN_AND: mpn_and_n_oc_32(r, a, b, n); break;
-    case CATCRYPT_MPN_IOR: mpn_ior_n_oc_32(r, a, b, n); break;
-    default:               mpn_xor_n_oc_32(r, a, b, n); break;
+    case CATCRYPT_MPN_AND: mpn_and_n_loop_owned(r, a, b, n); break;
+    case CATCRYPT_MPN_IOR: mpn_ior_n_loop_owned(r, a, b, n); break;
+    default:               mpn_xor_n_loop_owned(r, a, b, n); break;
     }
     size_t sz = std::max(la, lb);
     if (sz == n) return;
@@ -989,13 +957,20 @@ void mul2k(mpz & a, mpz const & b, unsigned k) {
     size_t   new_sz      = old_sz + word_shift + 1;
     digit_buffer ds;
     ds.ensure_capacity(new_sz);
-    // CATCRYPT VERIFIED MPN: for non-negative b, the archive's lshift entry
-    // writes the same new_sz digits as the loop below.
+    // CATCRYPT VERIFIED MPN: for non-negative b, the same new_sz digits as the
+    // loop below: word_shift zero digits, then b shifted by bit_shift with the
+    // bits shifted out in the top digit. The funnel kernel computes the
+    // sub-digit shift with a zero spill-in; bit_shift = 0 is a copy.
     if (!b.m_sign) {
         catcrypt_mpn_count(CATCRYPT_MPN_LSHIFT, true);
-        mpn_lshift_oc_32(ds.begin(), b.m_digits, b.m_size, k);
+        mpn_digit * r = ds.begin();
+        memset(r, 0, new_sz * sizeof(mpn_digit));
+        if (bit_shift == 0)
+            memcpy(r + word_shift, b.m_digits, old_sz * sizeof(mpn_digit));
+        else
+            mpn_shift_rt(r + word_shift, b.m_digits, old_sz, bit_shift);
         a.m_sign = false;
-        a.set(new_sz, ds.begin());
+        a.set(new_sz, r);
         return;
     }
     catcrypt_mpn_count(CATCRYPT_MPN_LSHIFT, false);
@@ -1036,14 +1011,25 @@ void div2k(mpz & a, mpz const & b, unsigned k) {
     unsigned bit_shift  = k % (8 * sizeof(mpn_digit));
     unsigned comp_shift = (8 * sizeof(mpn_digit)) - bit_shift;
     digit_buffer ds;
-    // CATCRYPT VERIFIED MPN: for non-negative b, the archive's rshift entry
-    // writes the same new_sz digits as the loops below.
+    // CATCRYPT VERIFIED MPN: for non-negative b, the same new_sz digits as the
+    // loops below. Shifting the top new_sz digits of b left by
+    // 64 - bit_shift into new_sz + 1 digits puts floor(value / 2^bit_shift) in
+    // digits 1..new_sz and the dropped bits in digit 0; bit_shift = 0 is a copy.
     if (!b.m_sign) {
         catcrypt_mpn_count(CATCRYPT_MPN_RSHIFT, true);
-        ds.ensure_capacity(new_sz);
-        mpn_rshift_oc_32(ds.begin(), b.m_digits, b.m_size, k);
-        a.m_sign = false;
-        a.set(new_sz, ds.begin());
+        mpn_digit const * src = b.m_digits + digit_shift;
+        ds.ensure_capacity(new_sz + 1);
+        mpn_digit * r = ds.begin();
+        if (bit_shift == 0) {
+            memcpy(r, src, new_sz * sizeof(mpn_digit));
+            a.m_sign = false;
+            a.set(new_sz, r);
+        } else {
+            memset(r, 0, (new_sz + 1) * sizeof(mpn_digit));
+            mpn_shift_rt(r, src, new_sz, 64 - bit_shift);
+            a.m_sign = false;
+            a.set(new_sz, r + 1);
+        }
         return;
     }
     catcrypt_mpn_count(CATCRYPT_MPN_RSHIFT, false);
@@ -1103,13 +1089,7 @@ uint32 mpz::mod32() const {
 }
 
 uint64 mpz::mod64() const {
-    uint64 ret;
-    if (m_size == 1) {
-        ret = m_digits[0];
-    }
-    else {
-        ret = m_digits[0] + (static_cast<uint64>(m_digits[1]) << 8*sizeof(mpn_digit));
-    }
+    uint64 ret = m_digits[0];
     if (m_sign) {
         ret = -ret;
     }
@@ -1133,8 +1113,7 @@ int64 mpz::smod64() const {
 }
 
 void power(mpz & a, mpz const & b, unsigned k) {
-    a = b;
-    a.pow(k);
+    a = b.pow(k);
 }
 
 void gcd(mpz & g, mpz const & a, mpz const & b) {
@@ -1165,7 +1144,9 @@ std::ostream & operator<<(std::ostream & out, mpz const & v) {
     if (v.m_sign)
         out << "-";
     buffer<char, 1024> tmp;
-    tmp.resize(11*v.m_size, 0);
+    // A 64-bit digit has at most 20 decimal digits; mpn_to_string writes the
+    // digits and a terminating zero without checking the buffer size.
+    tmp.resize(20*v.m_size + 2, 0);
     out << mpn_to_string(v.m_digits, v.m_size, tmp.begin(), tmp.size());
     return out;
 }

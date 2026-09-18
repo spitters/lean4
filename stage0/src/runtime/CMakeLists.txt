@@ -95,6 +95,29 @@ set(
   openssl.cpp
 )
 
+# CATCRYPT VERIFIED MPN: in the non-GMP runtime, mpn.cpp and mpz.cpp call the
+# 64-bit limb kernels emitted and byte-encoded by the CatCrypt compiler. Their
+# ELF objects are in catcrypt/ (provenance in catcrypt/README.md) and are
+# archived into both runtime libraries like the compiled sources. They are
+# x86-64 System V objects, so the non-GMP runtime builds only for x86-64 Linux.
+# See CATCRYPT_MPN_TCB.md for the trust-base accounting.
+if(NOT USE_GMP MATCHES "ON")
+  if(NOT (CMAKE_SYSTEM_NAME MATCHES "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64"))
+    message(FATAL_ERROR "USE_GMP=OFF links the CatCrypt x86-64 limb kernels and needs x86-64 Linux")
+  endif()
+  set(CATCRYPT_MPN_OBJS
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_add_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_sub_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_and_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_ior_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_xor_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_shift_rt_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_cmp_ct_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_mul_basecase_rt_owned.o)
+  set_source_files_properties(${CATCRYPT_MPN_OBJS} PROPERTIES EXTERNAL_OBJECT true GENERATED false)
+  list(APPEND RUNTIME_OBJS ${CATCRYPT_MPN_OBJS})
+endif()
+
 add_library(leanrt_initial-exec STATIC ${RUNTIME_OBJS})
 set_target_properties(leanrt_initial-exec PROPERTIES ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
@@ -113,6 +136,7 @@ if(USE_MIMALLOC)
   target_link_libraries(leanrt_initial-exec PRIVATE mimalloc_initial-exec)
   target_link_libraries(leanrt PRIVATE mimalloc_local-exec)
 endif()
+
 # We do not export Lean symbols when statically linking on Windows.
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
   target_compile_options(leanrt PRIVATE -ULEAN_EXPORTING)

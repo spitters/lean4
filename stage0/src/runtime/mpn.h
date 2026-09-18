@@ -18,9 +18,14 @@ Revision History:
 --*/
 #pragma once
 #include <stddef.h>
+#include <stdint.h>
 
 namespace lean {
-typedef unsigned int mpn_digit;
+// CATCRYPT VERIFIED MPN: 64-bit digits, the limb width of the CatCrypt kernels
+// the non-GMP runtime calls (see CATCRYPT_MPN_TCB.md). Compacted .olean files
+// store mpz digits at this width, so every stage that reads or writes them must
+// be built with the same definition.
+typedef uint64_t mpn_digit;
 
 int mpn_compare(mpn_digit const * a, size_t lnga,
                 mpn_digit const * b, size_t lngb);

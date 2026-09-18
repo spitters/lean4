@@ -28,13 +28,14 @@ Revision History:
 #define max(a,b)    (((a) > (b)) ? (a) : (b))
 
 // CATCRYPT VERIFIED MPN: mpn_add, mpn_sub, mpn_compare and mpn_mul call the
-// u32 entry points of libcatcrypt_mpn.a (declared in runtime/mpz.h), which run
-// u64 limb kernels emitted by the CatCrypt compiler. mpn_div and mpn_to_string
-// keep the fallback implementation below. See CATCRYPT_MPN_TCB.md.
+// 64-bit limb kernels emitted by the CatCrypt compiler (declared in
+// runtime/mpz.h). mpn_div and mpn_to_string keep the fallback implementation
+// below. See CATCRYPT_MPN_TCB.md.
 
 namespace lean {
 
-typedef uint64_t mpn_double_digit;
+static_assert(sizeof(mpn_digit) == sizeof(uint64_t), "the kernels take 64-bit limbs");
+typedef unsigned __int128 mpn_double_digit;
 static_assert(sizeof(mpn_double_digit) == 2 * sizeof(mpn_digit), "size alignment");
 
 static const mpn_digit zero = 0;
@@ -78,19 +79,28 @@ typedef buffer<mpn_digit, CATCRYPT_MPN_STACK_DIGITS> catcrypt_scratch;
 
 // CATCRYPT VERIFIED MPN: both operands must be normalized mpz digit arrays (at
 // least one digit, and a nonzero top digit unless the value is the single digit
-// 0), the form every caller in mpz.cpp passes. mpn_cmp_oc_32 then orders
-// operands of different lengths by length and aborts on an unnormalized one.
+// 0), the form every caller in mpz.cpp passes. Operands of different lengths
+// are then ordered by length; equal lengths go to the constant-time kernel.
 int mpn_compare(mpn_digit const * a, size_t const lnga,
                 mpn_digit const * b, size_t const lngb) {
     lean_assert(lnga > 0 && (lnga == 1 || a[lnga - 1] != 0));
     lean_assert(lngb > 0 && (lngb == 1 || b[lngb - 1] != 0));
     catcrypt_mpn_count(CATCRYPT_MPN_CMP, true);
-    return mpn_cmp_oc_32(a, (uint64_t)lnga, b, (uint64_t)lngb);
+    if (lnga != lngb)
+        return lnga > lngb ? 1 : -1;
+    uint64_t cell = 0;
+    mpn_cmp_ct(&cell, a, b, lnga);
+    if (cell == 0) return 0;
+    if (cell == 1) return 1;
+    if (cell == UINT64_MAX) return -1;
+    lean_internal_panic("mpn_compare: kernel result out of range");
 }
 
 // CATCRYPT VERIFIED MPN: equal-length add over operands zero-extended to
 // len+1 digits, so the carry lands in the top digit; writes len+1 digits to c
-// and sets *plngc to the normalized length (at least 1).
+// and sets *plngc to the normalized length (at least 1). c may coincide with a
+// or b (mpn_div's LEAN_DEBUG check calls it in place): the kernel writes to
+// scratch and the result is copied afterwards.
 void  mpn_add(mpn_digit const * a, size_t const lnga,
               mpn_digit const * b, size_t const lngb,
               mpn_digit * c, size_t const lngc_alloc,
@@ -100,20 +110,22 @@ void  mpn_add(mpn_digit const * a, size_t const lnga,
     lean_assert(lngc_alloc == len+1 && len > 0);
     size_t ext = len + 1;
     catcrypt_scratch scratch;
-    scratch.ensure_capacity(2 * ext);
-    mpn_digit * ea = scratch.begin();
-    mpn_digit * eb = ea + ext;
+    scratch.ensure_capacity(3 * ext);
+    mpn_digit * ea  = scratch.begin();
+    mpn_digit * eb  = ea + ext;
+    mpn_digit * res = eb + ext;
     memset(ea, 0, 2 * ext * sizeof(mpn_digit));
     if (lnga > 0) memcpy(ea, a, lnga * sizeof(mpn_digit));
     if (lngb > 0) memcpy(eb, b, lngb * sizeof(mpn_digit));
-    mpn_add_n_oc_32(c, ea, eb, (uint64_t)ext);
+    mpn_add_n_loop_owned(res, ea, eb, ext);
+    memcpy(c, res, ext * sizeof(mpn_digit));
     size_t &os = *plngc;
     for (os = ext; os > 1 && c[os-1] == 0; ) os--;
     lean_assert(os > 0 && os <= ext);
 }
 
 // CATCRYPT VERIFIED MPN: equal-length sub over operands zero-extended to
-// len+1 digits; writes len digits of a - b (mod 2^(32 len)) to c and sets
+// len+1 digits; writes len digits of a - b (mod 2^(64 len)) to c and sets
 // *pborrow to 1 exactly when a < b (the top digit of the extended difference
 // is then nonzero). c may coincide with a or b (mpn_div calls it in place):
 // the kernel writes to scratch and the result is copied afterwards.
@@ -131,18 +143,31 @@ void mpn_sub(mpn_digit const * a, size_t const lnga,
     memset(ea, 0, 2 * ext * sizeof(mpn_digit));
     if (lnga > 0) memcpy(ea, a, lnga * sizeof(mpn_digit));
     if (lngb > 0) memcpy(eb, b, lngb * sizeof(mpn_digit));
-    mpn_sub_n_oc_32(res, ea, eb, (uint64_t)ext);
+    mpn_sub_n_loop_owned(res, ea, eb, ext);
     if (len > 0) memcpy(c, res, len * sizeof(mpn_digit));
     *pborrow = (res[len] != 0) ? (mpn_digit)1 : (mpn_digit)0;
 }
 
 // CATCRYPT VERIFIED MPN: writes the lnga+lngb digit product (unnormalized) to
-// c, which must not overlap a or b.
+// c. The kernel needs nonempty operands and a zeroed output of lnga+lngb+1
+// digits, so it writes to scratch; c may therefore overlap a or b.
 void mpn_mul(mpn_digit const * a, size_t const lnga,
              mpn_digit const * b, size_t const lngb,
              mpn_digit * c) {
     catcrypt_mpn_count(CATCRYPT_MPN_MUL, true);
-    mpn_mul_oc_32(c, a, (uint64_t)lnga, b, (uint64_t)lngb);
+    size_t out = lnga + lngb;
+    if (lnga == 0 || lngb == 0) {
+        if (out > 0) memset(c, 0, out * sizeof(mpn_digit));
+        return;
+    }
+    catcrypt_scratch scratch;
+    scratch.ensure_capacity(out + 1);
+    mpn_digit * r = scratch.begin();
+    memset(r, 0, (out + 1) * sizeof(mpn_digit));
+    mpn_mul_basecase_rt(r, a, b, lnga, lngb);
+    if (r[out] != 0)
+        lean_internal_panic("mpn_mul: kernel wrote past the product");
+    memcpy(c, r, out * sizeof(mpn_digit));
 }
 
 #define MASK_FIRST (~((mpn_digit)(-1) >> 1))
@@ -346,9 +371,9 @@ char * mpn_to_string(mpn_digit const * a, size_t const lng, char * buf, size_t c
 
     if (lng == 1) {
 #ifdef _WINDOWS
-        sprintf_s(buf, lbuf, "%u", *a);
+        sprintf_s(buf, lbuf, "%llu", static_cast<unsigned long long>(*a));
 #else
-        snprintf(buf, lbuf, "%u", *a);
+        snprintf(buf, lbuf, "%llu", static_cast<unsigned long long>(*a));
 #endif
     }
     else {

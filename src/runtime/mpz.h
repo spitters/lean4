@@ -75,7 +75,7 @@ public:
 #ifdef LEAN_USE_GMP
         return static_cast<unsigned>(mpz_get_si(m_val));
 #else
-        return m_digits[0];
+        return static_cast<unsigned>(m_digits[0]);
 #endif
     }
 
@@ -313,29 +313,29 @@ struct mpz_cmp_fn {
 #include <atomic>
 #include <cstdint>
 
-/* CATCRYPT VERIFIED MPN: u32-digit entry points of the catcrypt-mpn static
-   archive (libcatcrypt_mpn.a), backed by u64 kernels emitted by the CatCrypt
-   compiler; see CATCRYPT_MPN_TCB.md. Lengths are in u32 limbs. In every entry
-   the output must not overlap an input; inputs may overlap each other; a
-   pointer may be null only when its length is zero. */
+/* CATCRYPT VERIFIED MPN: the x86-64 limb kernels emitted and byte-encoded by
+   the CatCrypt compiler, linked from the ELF objects in runtime/catcrypt/; see
+   CATCRYPT_MPN_TCB.md. SysV calling convention; 64-bit limbs, little-endian.
+   The verified statements are over distinct arrays: an output never overlaps
+   an input, inputs may coincide. The kernels use BMI2 and the red zone. */
 extern "C" {
-/* op[0..n) = ap[0..n) op bp[0..n) mod 2^(32 n); carry/borrow dropped. */
-void mpn_add_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
-void mpn_sub_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
-/* op[i] = ap[i] & | ^ bp[i] for i < n. */
-void mpn_and_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
-void mpn_ior_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
-void mpn_xor_n_oc_32(unsigned int * op, unsigned int const * ap, unsigned int const * bp, uint64_t n);
-/* Three-way comparison of the values ap[0..an) and bp[0..bn): 1, 0 or -1. */
-int mpn_cmp_oc_32(unsigned int const * ap, uint64_t an, unsigned int const * bp, uint64_t bn);
-/* rp[0 .. an + k/32 + 1) = ap[0..an) * 2^k, unnormalized. */
-void mpn_lshift_oc_32(unsigned int * rp, unsigned int const * ap, uint64_t an, uint64_t k);
-/* rp[0 .. an - k/32) = floor(ap[0..an) / 2^k), unnormalized; writes nothing
-   when k/32 >= an. */
-void mpn_rshift_oc_32(unsigned int * rp, unsigned int const * ap, uint64_t an, uint64_t k);
-/* rp[0 .. an + bn) = ap[0..an) * bp[0..bn), unnormalized. */
-void mpn_mul_oc_32(unsigned int * rp, unsigned int const * ap, uint64_t an,
-                   unsigned int const * bp, uint64_t bn);
+/* rp[0..n) = ap[0..n) + bp[0..n) mod 2^(64 n). */
+uint64_t mpn_add_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+/* rp[0..n) = ap[0..n) - bp[0..n) mod 2^(64 n). */
+uint64_t mpn_sub_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+/* rp[i] = ap[i] & | ^ bp[i] for i < n. */
+void mpn_and_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+void mpn_ior_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+void mpn_xor_n_loop_owned(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+/* Funnel shift, 1 <= sh <= 63, rp[0] < 2^sh on entry:
+   value(rp[0..n]) = value(up[0..n)) * 2^sh + rp[0]. */
+void mpn_shift_rt(uint64_t * rp, uint64_t const * up, uint64_t n, uint64_t sh);
+/* rp[0] = 1, 0 or 2^64-1 as ap[0..n) >, =, < bp[0..n); rp[0] zero on entry. */
+void mpn_cmp_ct(uint64_t * rp, uint64_t const * ap, uint64_t const * bp, uint64_t n);
+/* un, vn >= 1, rp[0..un+vn] zero on entry:
+   value(rp[0..un+vn)) = value(up[0..un)) * value(vp[0..vn)), rp[un+vn] = 0. */
+void mpn_mul_basecase_rt(uint64_t * rp, uint64_t const * up, uint64_t const * vp,
+                         uint64_t un, uint64_t vn);
 }
 
 namespace lean {

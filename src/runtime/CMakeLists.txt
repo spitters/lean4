@@ -95,17 +95,27 @@ set(
   openssl.cpp
 )
 
-# CATCRYPT VERIFIED MPN: mpn.cpp (add, sub, compare, mul) and mpz.cpp (&=, |=,
-# ^=, mul2k, div2k on non-negative operands) call the mpn_*_oc_32 entries of
-# the catcrypt-mpn staticlib libcatcrypt_mpn.a, which run u64 limb kernels
-# emitted by the CatCrypt compiler behind a safe-Rust u32 seam. Build the
-# archive no_std so it pulls no Rust std runtime:
-#   cargo build --release --no-default-features \
-#     --manifest-path <catcrypt>/crates/catcrypt-mpn/Cargo.toml
-# See CATCRYPT_MPN_TCB.md for the trust-base accounting. Path override:
-# -DCATCRYPT_MPN_LIB=/abs/path/to/libcatcrypt_mpn.a.
-if(NOT DEFINED CATCRYPT_MPN_LIB)
-  set(CATCRYPT_MPN_LIB "$ENV{HOME}/Claude/SSProve-lean/crates/catcrypt-mpn/target/release/libcatcrypt_mpn.a")
+# CATCRYPT VERIFIED MPN: in the non-GMP runtime, mpn.cpp and mpz.cpp call the
+# 64-bit limb kernels emitted and byte-encoded by the CatCrypt compiler. Their
+# ELF objects are in catcrypt/ (provenance in catcrypt/README.md) and are
+# archived into both runtime libraries like the compiled sources. They are
+# x86-64 System V objects, so the non-GMP runtime builds only for x86-64 Linux.
+# See CATCRYPT_MPN_TCB.md for the trust-base accounting.
+if(NOT USE_GMP MATCHES "ON")
+  if(NOT (CMAKE_SYSTEM_NAME MATCHES "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64"))
+    message(FATAL_ERROR "USE_GMP=OFF links the CatCrypt x86-64 limb kernels and needs x86-64 Linux")
+  endif()
+  set(CATCRYPT_MPN_OBJS
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_add_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_sub_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_and_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_ior_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_xor_n_loop_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_shift_rt_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_cmp_ct_owned.o
+    ${CMAKE_CURRENT_SOURCE_DIR}/catcrypt/mpn_mul_basecase_rt_owned.o)
+  set_source_files_properties(${CATCRYPT_MPN_OBJS} PROPERTIES EXTERNAL_OBJECT true GENERATED false)
+  list(APPEND RUNTIME_OBJS ${CATCRYPT_MPN_OBJS})
 endif()
 
 add_library(leanrt_initial-exec STATIC ${RUNTIME_OBJS})
@@ -127,16 +137,6 @@ if(USE_MIMALLOC)
   target_link_libraries(leanrt PRIVATE mimalloc_local-exec)
 endif()
 
-# CATCRYPT VERIFIED MPN: propagate the verified-kernel archive as an interface
-# dependency of both runtime archives, so every target that links leanrt also
-# links libcatcrypt_mpn.a and resolves the mpn_*_oc_32 entries. The archive is
-# no_std (see the comment above), so it needs only libc
-# (memcpy/memset/calloc/free/abort) and the compiler-rt intrinsics the C
-# toolchain already provides.
-add_library(catcrypt_mpn STATIC IMPORTED GLOBAL)
-set_target_properties(catcrypt_mpn PROPERTIES IMPORTED_LOCATION "${CATCRYPT_MPN_LIB}")
-target_link_libraries(leanrt INTERFACE catcrypt_mpn)
-target_link_libraries(leanrt_initial-exec INTERFACE catcrypt_mpn)
 # We do not export Lean symbols when statically linking on Windows.
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
   target_compile_options(leanrt PRIVATE -ULEAN_EXPORTING)

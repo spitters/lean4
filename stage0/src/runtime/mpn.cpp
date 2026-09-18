@@ -17,109 +17,157 @@ Revision History:
 
 --*/
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "runtime/mpn.h"
+#include "runtime/mpz.h"
 #include "runtime/debug.h"
 #include "runtime/buffer.h"
 
 #define max(a,b)    (((a) > (b)) ? (a) : (b))
 
+// CATCRYPT VERIFIED MPN: mpn_add, mpn_sub, mpn_compare and mpn_mul call the
+// 64-bit limb kernels emitted by the CatCrypt compiler (declared in
+// runtime/mpz.h). mpn_div and mpn_to_string keep the fallback implementation
+// below. See CATCRYPT_MPN_TCB.md.
+
 namespace lean {
 
-typedef uint64_t mpn_double_digit;
+static_assert(sizeof(mpn_digit) == sizeof(uint64_t), "the kernels take 64-bit limbs");
+typedef unsigned __int128 mpn_double_digit;
 static_assert(sizeof(mpn_double_digit) == 2 * sizeof(mpn_digit), "size alignment");
 
 static const mpn_digit zero = 0;
 
-int mpn_compare(mpn_digit const * a, size_t const lnga,
-                mpn_digit const * b, size_t const lngb) {
-    int res = 0;
+#define DIGIT_BITS (sizeof(mpn_digit)*8)
+#define HALF_BITS (sizeof(mpn_digit)*4)
 
-    size_t j = max(lnga, lngb) - 1;
-    for (; j != (size_t)-1 && res == 0; j--) {
-        mpn_digit const & u_j = (j < lnga) ? a[j] : zero;
-        mpn_digit const & v_j = (j < lngb) ? b[j] : zero;
-        if (u_j > v_j)
-            res = 1;
-        else if (u_j < v_j)
-            res = -1;
+// CATCRYPT VERIFIED MPN: call counters (see runtime/mpz.h).
+static const char * const g_catcrypt_mpn_op_names[CATCRYPT_MPN_NUM_OPS] = {
+    "add", "sub", "compare", "mul", "and", "ior", "xor", "lshift", "rshift"
+};
+
+std::atomic<uint64_t> g_catcrypt_mpn_routed[CATCRYPT_MPN_NUM_OPS];
+std::atomic<uint64_t> g_catcrypt_mpn_legacy[CATCRYPT_MPN_NUM_OPS];
+
+static void catcrypt_mpn_print_stats() {
+    fprintf(stderr, "catcrypt-mpn call counts (routed / legacy):\n");
+    for (int op = 0; op < CATCRYPT_MPN_NUM_OPS; op++) {
+        fprintf(stderr, "  %-8s %20llu %20llu\n", g_catcrypt_mpn_op_names[op],
+                static_cast<unsigned long long>(g_catcrypt_mpn_routed[op].load()),
+                static_cast<unsigned long long>(g_catcrypt_mpn_legacy[op].load()));
     }
-    return res;
 }
 
+static bool catcrypt_mpn_stats_init() {
+    if (getenv("LEAN_CATCRYPT_MPN_STATS") == nullptr)
+        return false;
+    atexit(catcrypt_mpn_print_stats);
+    return true;
+}
+
+// Dynamic initialization; a call made before it runs sees `false` (static
+// storage is zero-initialized first) and is not counted.
+bool g_catcrypt_mpn_stats = catcrypt_mpn_stats_init();
+
+// CATCRYPT VERIFIED MPN: scratch digits for the zero-extended operands of
+// mpn_add/mpn_sub. Up to CATCRYPT_MPN_STACK_DIGITS digits live in the buffer's
+// inline storage; larger requests are heap-allocated by buffer::ensure_capacity.
+#define CATCRYPT_MPN_STACK_DIGITS 1024
+typedef buffer<mpn_digit, CATCRYPT_MPN_STACK_DIGITS> catcrypt_scratch;
+
+// CATCRYPT VERIFIED MPN: both operands must be normalized mpz digit arrays (at
+// least one digit, and a nonzero top digit unless the value is the single digit
+// 0), the form every caller in mpz.cpp passes. Operands of different lengths
+// are then ordered by length; equal lengths go to the constant-time kernel.
+int mpn_compare(mpn_digit const * a, size_t const lnga,
+                mpn_digit const * b, size_t const lngb) {
+    lean_assert(lnga > 0 && (lnga == 1 || a[lnga - 1] != 0));
+    lean_assert(lngb > 0 && (lngb == 1 || b[lngb - 1] != 0));
+    catcrypt_mpn_count(CATCRYPT_MPN_CMP, true);
+    if (lnga != lngb)
+        return lnga > lngb ? 1 : -1;
+    uint64_t cell = 0;
+    mpn_cmp_ct(&cell, a, b, lnga);
+    if (cell == 0) return 0;
+    if (cell == 1) return 1;
+    if (cell == UINT64_MAX) return -1;
+    lean_internal_panic("mpn_compare: kernel result out of range");
+}
+
+// CATCRYPT VERIFIED MPN: equal-length add over operands zero-extended to
+// len+1 digits, so the carry lands in the top digit; writes len+1 digits to c
+// and sets *plngc to the normalized length (at least 1). c may coincide with a
+// or b (mpn_div's LEAN_DEBUG check calls it in place): the kernel writes to
+// scratch and the result is copied afterwards.
 void  mpn_add(mpn_digit const * a, size_t const lnga,
               mpn_digit const * b, size_t const lngb,
               mpn_digit * c, size_t const lngc_alloc,
               size_t * plngc) {
-    // Essentially Knuth's Algorithm A
+    catcrypt_mpn_count(CATCRYPT_MPN_ADD, true);
     size_t len = max(lnga, lngb);
     lean_assert(lngc_alloc == len+1 && len > 0);
-    mpn_digit k = 0;
-    mpn_digit r;
-    bool c1, c2;
-    for (size_t j = 0; j < len; j++) {
-        mpn_digit const & u_j = (j < lnga) ? a[j] : zero;
-        mpn_digit const & v_j = (j < lngb) ? b[j] : zero;
-        r = u_j + v_j; c1 = r < u_j;
-        c[j] = r + k;  c2 = c[j] < r;
-        k = c1 | c2;
-    }
-    c[len] = k;
+    size_t ext = len + 1;
+    catcrypt_scratch scratch;
+    scratch.ensure_capacity(3 * ext);
+    mpn_digit * ea  = scratch.begin();
+    mpn_digit * eb  = ea + ext;
+    mpn_digit * res = eb + ext;
+    memset(ea, 0, 2 * ext * sizeof(mpn_digit));
+    if (lnga > 0) memcpy(ea, a, lnga * sizeof(mpn_digit));
+    if (lngb > 0) memcpy(eb, b, lngb * sizeof(mpn_digit));
+    mpn_add_n_loop_owned(res, ea, eb, ext);
+    memcpy(c, res, ext * sizeof(mpn_digit));
     size_t &os = *plngc;
-    for (os = len+1; os > 1 && c[os-1] == 0; ) os--;
-    lean_assert(os > 0 && os <= len+1);
+    for (os = ext; os > 1 && c[os-1] == 0; ) os--;
+    lean_assert(os > 0 && os <= ext);
 }
 
+// CATCRYPT VERIFIED MPN: equal-length sub over operands zero-extended to
+// len+1 digits; writes len digits of a - b (mod 2^(64 len)) to c and sets
+// *pborrow to 1 exactly when a < b (the top digit of the extended difference
+// is then nonzero). c may coincide with a or b (mpn_div calls it in place):
+// the kernel writes to scratch and the result is copied afterwards.
 void mpn_sub(mpn_digit const * a, size_t const lnga,
              mpn_digit const * b, size_t const lngb,
              mpn_digit * c, mpn_digit * pborrow) {
-    // Essentially Knuth's Algorithm S
+    catcrypt_mpn_count(CATCRYPT_MPN_SUB, true);
     size_t len = max(lnga, lngb);
-    mpn_digit & k = *pborrow; k = 0;
-    mpn_digit r;
-    bool c1, c2;
-    for (size_t j = 0; j < len; j++) {
-        mpn_digit const & u_j = (j < lnga) ? a[j] : zero;
-        mpn_digit const & v_j = (j < lngb) ? b[j] : zero;
-        r = u_j - v_j; c1 = r > u_j;
-        c[j] = r - k;  c2 = c[j] > r;
-        k = c1 | c2;
-    }
+    size_t ext = len + 1;
+    catcrypt_scratch scratch;
+    scratch.ensure_capacity(3 * ext);
+    mpn_digit * ea  = scratch.begin();
+    mpn_digit * eb  = ea + ext;
+    mpn_digit * res = eb + ext;
+    memset(ea, 0, 2 * ext * sizeof(mpn_digit));
+    if (lnga > 0) memcpy(ea, a, lnga * sizeof(mpn_digit));
+    if (lngb > 0) memcpy(eb, b, lngb * sizeof(mpn_digit));
+    mpn_sub_n_loop_owned(res, ea, eb, ext);
+    if (len > 0) memcpy(c, res, len * sizeof(mpn_digit));
+    *pborrow = (res[len] != 0) ? (mpn_digit)1 : (mpn_digit)0;
 }
 
+// CATCRYPT VERIFIED MPN: writes the lnga+lngb digit product (unnormalized) to
+// c. The kernel needs nonempty operands and a zeroed output of lnga+lngb+1
+// digits, so it writes to scratch; c may therefore overlap a or b.
 void mpn_mul(mpn_digit const * a, size_t const lnga,
              mpn_digit const * b, size_t const lngb,
              mpn_digit * c) {
-    // Essentially Knuth's Algorithm M.
-    // Perhaps implement a more efficient version, see e.g., Knuth, Section 4.3.3.
-    size_t i;
-    mpn_digit k;
-
-#define DIGIT_BITS (sizeof(mpn_digit)*8)
-#define HALF_BITS (sizeof(mpn_digit)*4)
-
-    for (unsigned i = 0; i < lnga; i++)
-        c[i] = 0;
-
-    for (size_t j = 0; j < lngb; j++) {
-        mpn_digit const & v_j = b[j];
-        if (v_j == 0) { // This branch may be omitted according to Knuth.
-            c[j+lnga] = 0;
-        }
-        else {
-            k = 0;
-            for (i = 0; i < lnga; i++) {
-                mpn_digit const & u_i = a[i];
-                mpn_double_digit t;
-                t = ((mpn_double_digit)u_i * (mpn_double_digit)v_j) +
-                    (mpn_double_digit) c[i+j] +
-                    (mpn_double_digit) k;
-
-                c[i+j] = (t << DIGIT_BITS) >> DIGIT_BITS;
-                k = t >> DIGIT_BITS;
-            }
-            c[j+lnga] = k;
-        }
+    catcrypt_mpn_count(CATCRYPT_MPN_MUL, true);
+    size_t out = lnga + lngb;
+    if (lnga == 0 || lngb == 0) {
+        if (out > 0) memset(c, 0, out * sizeof(mpn_digit));
+        return;
     }
+    catcrypt_scratch scratch;
+    scratch.ensure_capacity(out + 1);
+    mpn_digit * r = scratch.begin();
+    memset(r, 0, (out + 1) * sizeof(mpn_digit));
+    mpn_mul_basecase_rt(r, a, b, lnga, lngb);
+    if (r[out] != 0)
+        lean_internal_panic("mpn_mul: kernel wrote past the product");
+    memcpy(c, r, out * sizeof(mpn_digit));
 }
 
 #define MASK_FIRST (~((mpn_digit)(-1) >> 1))
@@ -323,9 +371,9 @@ char * mpn_to_string(mpn_digit const * a, size_t const lng, char * buf, size_t c
 
     if (lng == 1) {
 #ifdef _WINDOWS
-        sprintf_s(buf, lbuf, "%u", *a);
+        sprintf_s(buf, lbuf, "%llu", static_cast<unsigned long long>(*a));
 #else
-        snprintf(buf, lbuf, "%u", *a);
+        snprintf(buf, lbuf, "%llu", static_cast<unsigned long long>(*a));
 #endif
     }
     else {
