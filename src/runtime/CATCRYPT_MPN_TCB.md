@@ -47,10 +47,14 @@ The five equal-length loops (`add`, `sub`, `and`, `ior`, `xor`) come from
 from the unoptimized `toLprogPhysAbi` program. What is proved differs per
 kernel:
 
-- `and`, `ior`, `xor`, shift and compare: the machine execution of the emitted
-  loop computes the word-level contract (`MpnLogicalLsemTie`,
+- `and`, `ior`, `xor`, shift and compare: a machine-level (`lsem`) loop built
+  from the front-compiled loop body, `loopLinstrRM … (loopBodyArrFullMN
+  update …)`, computes the word-level contract (`MpnLogicalLsemTie`,
   `MpnShiftLsemTie`, `MpnCmpLsemTie`, discharged in the
-  `JasminLsemMemArrTrip*` modules);
+  `JasminLsemMemArrTrip*` modules). That loop is a model of the emitted
+  kernel, not the encoded program itself: no theorem connects it to the
+  physical-ABI `Lprog` of `ComL.toLprogPhysAbi` (register allocation, spill
+  slots, prologue) that the byte encoder turns into the object;
 - multiply: the compiled program's denotation is the schoolbook product
   (`MpnMulBasecaseFrontDenote.bcRtProg_val`); no theorem connects the machine
   execution of the nested loop to that denotation;
@@ -113,8 +117,9 @@ words.
 ## Limits
 
 - The glue is trusted, not verified.
-- The multiply kernel is verified to the program denotation only, and the add
-  and sub loops carry no value theorem (see above).
+- The machine-level theorems describe a model loop, not the encoded `Lprog`;
+  the multiply kernel is verified to the program denotation only; the add and
+  sub loops carry no value theorem (see above).
 - `mpn_div` and `mpn_to_string` remain the runtime's C.
 - The non-GMP runtime builds only for x86-64 Linux (ELF objects, System V ABI).
 - Compacted `.olean` files store `mpz` digits at the digit width; files written
