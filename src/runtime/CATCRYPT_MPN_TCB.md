@@ -52,21 +52,85 @@ kernel:
   update …)`, computes the word-level contract (`MpnLogicalLsemTie`,
   `MpnShiftLsemTie`, `MpnCmpLsemTie`, discharged in the
   `JasminLsemMemArrTrip*` modules). That loop is a model of the emitted
-  kernel, not the encoded program itself: no theorem connects it to the
-  physical-ABI `Lprog` of `ComL.toLprogPhysAbi` (register allocation, spill
-  slots, prologue) that the byte encoder turns into the object;
+  kernel rather than the encoded program; see "The model loop and the encoded
+  program" below for what stands between them;
 - multiply: the compiled program's denotation is the schoolbook product
   (`MpnMulBasecaseFrontDenote.bcRtProg_val`); no theorem connects the machine
   execution of the nested loop to that denotation;
 - add and sub: the loops are compiled by the front from covered `LowCT`
-  (`MpnLoopFrontEmit.addLprogFront`, `subLprogFront`), but no theorem states
-  that the compiled loop computes the sum or the difference; they are checked
-  by the differential harness only.
+  (`MpnLoopFrontEmit.addLprogFront`, `subLprogFront`). `MpnAddSubLsemTie`
+  gives the value of the carry (borrow) accumulator at the machine loop's halt
+  state, and `MpnAddSubOutFrame` gives what that loop leaves in its invariant
+  array slots, but no theorem states that the compiled loop writes the sum or
+  the difference to the output array. That statement cannot be made the way the
+  bitwise kernels make theirs: the array export's accumulator IS the output
+  array, while the carry family returns a register because the ABI returns the
+  carry in `RAX`, so `ArrMemN addUpdate` is ill-typed rather than unproved. The
+  output limbs are checked by the differential harness only.
+
+## The model loop and the encoded program
+
+The links between the `lsem` model loop and the physical-ABI `Lprog` that the
+byte encoder encodes are individually proved, and the chain is not assembled.
+
+Proved: the soundness side condition for the canonicalisation pass is
+`ThreadCert`'s second clause (`VIR/JasminLsemExportCanon.lean`) — every array
+reference the pass sends to the output must go through the current thread head,
+which is what `canonicalizeMemrefThread_threadCmd_run`'s counterexample
+violates; soundness under it is `lsemStraightMem_thread`, lifted by
+`canonNodeRM_faithful`; register renaming is `lsemFuelMemF_live` with
+`liveCert_of_ranges` and `physSigma_interf`.
+
+Not assembled, for one reason: the exporter's node and the canon node are
+related by a list equality whose precondition `ComRenOK` is **false** at the
+and-body. The front emits the array-index scaling as `shlImm 64 0` — a shift by
+zero, for a unit scale — and at an immediate shift the model chain and the
+export body emit different instructions (`immShift_wire_ne`). Behavioural
+agreement does not repair a list equality, so the route is to state the
+exporter's node as the expansion image of the canon node and transport the run
+with `lsemFuelMemF_expand` under `ComOpsPlain`, which holds for the and-body.
+
+Two further links are untouched: the two-address lowering with its R15/R14
+stack-slot routing, and the exporter term itself — the `toLprogPhysAbi_*`
+family quantifies over a free `Lcmd` body under a hypothesis of the shape
+`body = bindingHeads …` and never takes its pieces from the exporter.
+
+One referent question is open. `and_canon_machine_val` is about `andUpdate`
+from `MpnLogicalFrontEmit.logicBodyLowCT` at `NL = 8` with slots `rp`/`ap`/`bp`;
+`MpnLoopFrontEmit.binLprog "mpn_and_n_loop_owned"` is a separate definition at
+`N = 4` with slots `out`/`a`/`b`. Same shape, different terms, and no theorem
+ties them. Settle which is the shipped kernel before reading this vertical as
+reaching it.
+
+## The instruction semantics
 
 The kernels use BMI2 (`shlx`, `shrx`, `mulx`), so the runtime needs a CPU with
 BMI2, and write below their adjusted stack pointer inside the System V red
 zone. The runtime-trip kernels leave the final loop index in `RAX`; the runtime
 ignores that register and reads results through the output pointer.
+
+The model's instruction semantics is anchored to external specifications where
+one exists. `X86Backend/SailX86Lean.lean` proves agreement with the
+ACL2-derived Sail model (`rems-project/sail-x86-from-acl2`) for `add`, `sub`,
+`adc`, `sbb`, `and`, `or`, `xor`, and with SDM-transcribed Sail for `mulx`,
+`adcx` and `adox`. That model defines no BMI2 variable shift at all;
+`X86Backend/SailX86BmiShift.lean` anchors `shlx`, `shrx` and `sarx` to Intel's
+own executable specification (`github.com/intel/SDM`, `xml92/`), proving the
+data word for every operand pair and the no-flag-write property over an
+arbitrary state. The legacy flag-writing `SHL`/`SHR`/`SAR` and `MUL`/`IMUL`
+have no external anchor; `SailX86Validation.lean` checks them as recorded
+numbers only.
+
+## Differential evidence
+
+Beyond the harness in `catcrypt/harness`, the runtime as a whole has been
+differential-tested against the GMP build: the same computation run under
+`USE_GMP=OFF` and under stock Lean, with the outputs compared. The workload
+covers add and subtract at `fib 3000` width, sixty modular squarings at 4096
+bits, division and remainder of `fib 9001` by a multi-limb divisor, `ble` and
+`beq`, shifts and all three bitwise operations across a limb boundary, `gcd` of
+two multi-limb operands, a cube through `pow`, and `log2`. The outputs are
+identical.
 
 ## Code between the runtime and the kernels
 
@@ -117,9 +181,12 @@ words.
 ## Limits
 
 - The glue is trusted, not verified.
-- The machine-level theorems describe a model loop, not the encoded `Lprog`;
-  the multiply kernel is verified to the program denotation only; the add and
-  sub loops carry no value theorem (see above).
+- The machine-level theorems describe a model loop, not the encoded `Lprog`.
+  Every link between the two is proved and the chain is not assembled; the
+  obstacle is the `shlImm _ 0` wire disagreement, not a missing lemma. The
+  multiply kernel is verified to the program denotation only, and the add and
+  sub loops carry a carry-register and a frame theorem but no output-limb value
+  theorem (see above).
 - `mpn_div` and `mpn_to_string` remain the runtime's C.
 - The non-GMP runtime builds only for x86-64 Linux (ELF objects, System V ABI).
 - Compacted `.olean` files store `mpz` digits at the digit width; files written
