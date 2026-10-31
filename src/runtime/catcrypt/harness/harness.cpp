@@ -2,7 +2,8 @@
 
    The same source is linked twice: against this tree's src/runtime/mpn.cpp and
    mpz.cpp with the CatCrypt kernel objects (64-bit digits), and against the
-   v4.33.1 versions of the two files (32-bit digits). Operands are generated as
+   upstream versions of the two files at the base release v4.35.0 (32-bit
+   digits, no kernels; the Makefile's LEGACY_TAG). Operands are generated as
    32-bit words, identically in both builds, and packed into the build's digit
    width; every result is unpacked into 32-bit words with leading zero words
    removed, so the two builds print the same line exactly when they compute the
@@ -13,10 +14,16 @@
 
    mpn level: mpn_add, mpn_sub (the value when no borrow occurs, and the
    borrow), mpn_sub in place, mpn_compare, mpn_mul (also squaring), mpn_div
-   (whose normalization and correction steps call mpn_mul, mpn_sub and mpn_add).
+   (whose multiply-and-subtract and add-back steps call mpn_mul, mpn_sub and
+   mpn_add for a divisor of two or more digits).
    mpz level: &, |, ^ (both signs, including x op= x), mul2k and div2k on
-   non-negative operands (including a == b), *, +, -, /, %, cmp, log2, and the
-   uint64/size_t/int conversions.
+   non-negative operands (including a == b), *, +, -, /, %, cmp, log2, the
+   uint64/size_t/int conversions, and powm (the runtime entry of Nat.powMod) on
+   a non-negative base and exponent and a positive modulus. Each build prints
+   mpz::powm, the harness's own left-to-right square-and-multiply
+   (harness_powm), and whether the two agree; the cross-build comparison
+   therefore checks the patched mpz::powm against both computations carried out
+   by the oracle's code.
 
    Usage: harness <cases> <max-words> <seed> */
 #include <cstdint>
@@ -118,6 +125,24 @@ static digits normalized(words const & w) {
 static uint64_t rand_shift() {
     static const uint64_t fixed[] = {0, 1, 31, 32, 33, 63, 64, 65, 127, 128};
     return below(2) ? fixed[below(10)] : below(20001);
+}
+
+/* base^exp mod m by the left-to-right binary method over the bits of exp, read
+   from its 32-bit words, using only the mpz operators * and %. mpz::powm scans
+   the exponent from the low bit through mod8 and div2k and squares the base, so
+   the two computations share the multiply and the remainder but neither the
+   exponent scan nor the sequence of products. Requires m > 0. */
+static mpz harness_powm(mpz const & base, words const & exp, mpz const & m) {
+    mpz b = base % m;
+    mpz r = mpz(1) % m;
+    for (size_t i = exp.size(); i-- > 0;) {
+        for (int j = 31; j >= 0; j--) {
+            r = r * r % m;
+            if ((exp[i] >> j) & 1u)
+                r = r * b % m;
+        }
+    }
+    return r;
 }
 
 struct hasher {
@@ -317,6 +342,37 @@ static void mpz_case(size_t max_words) {
     if (!b.is_zero()) {
         emit_mpz("mpz_div", a / b);
         emit_mpz("mpz_rem", a % b);
+    }
+    {   // powm: non-negative base and exponent, positive modulus (Nat.powMod)
+        // Operand caps in 32-bit words. The cost of a case grows as
+        // (exponent bits) * (modulus words)^2; the Makefile's big run
+        // (max_words >= 1000) reaches a 4096-bit modulus and a 512-bit exponent.
+        bool big = max_words >= 1000;
+        size_t mod_cap = big ? 128 : 16;
+        size_t exp_cap = big ? 16 : 2;
+        words wm;
+        switch (below(8)) {
+        case 0: wm = words{1}; break;           // m = 1, where powm returns 0 early
+        case 1: wm = make_words(1); break;      // one-word modulus
+        default: wm = make_words(1 + rand_len(mod_cap - 1)); break;
+        }
+        if (wm.back() == 0) wm.back() = 1 + (uint32_t)below(0xFFFFFFFEu);
+        words wbase = below(8) == 0 ? words() : make_words(rand_len(2 * mod_cap));
+        words wexp = below(8) == 0 ? words() : make_words(1 + rand_len(exp_cap - 1));
+        mpz m, base, e;
+        acc::assign(m, false, to_digits(wm));
+        acc::assign(base, false, to_digits(wbase));
+        acc::assign(e, false, to_digits(wexp));
+        if ((long)g_case == g_dump) {
+            dump_words("powm base", wbase);
+            dump_words("powm exp", wexp);
+            dump_words("powm mod", wm);
+        }
+        mpz r = base.powm(e, m);
+        mpz s = harness_powm(base, wexp, m);
+        emit_mpz("mpz_powm", r);
+        emit_mpz("mpz_powm_harness", s);
+        emit_int("mpz_powm_agree", r == s ? 1 : 0);
     }
 }
 

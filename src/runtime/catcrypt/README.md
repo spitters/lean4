@@ -3,12 +3,16 @@
 ELF64 relocatable objects, x86-64 System V, 64-bit limbs. The non-GMP runtime
 archives them into `libleanrt` (see `../CMakeLists.txt`) and calls them from
 `../mpn.cpp` and `../mpz.cpp`; the declarations and contracts are in `../mpz.h`,
-the trust accounting in `../CATCRYPT_MPN_TCB.md`.
+the trust accounting in `src/runtime/CATCRYPT_MPN_TCB.md`. That path, and the
+harness path below, are from the repository root, because
+`stage0/src/runtime/catcrypt/` carries a copy of this file and of the objects.
 
 Each object is the output of the CatCrypt byte encoder
-(`X86Backend/LprogBytes.encodeLprogChecked`, `catcrypt-compiler` repository) on
-a front-compiled `Lprog`; no assembler produced them. The objects have no
-relocations and define one global symbol each.
+(`X86Backend/LprogBytes.encodeLprogChecked` in
+[catcrypt-compiler](https://github.com/spitters/catcrypt-compiler)) on a
+front-compiled `Lprog`; no assembler produced them. The objects have no
+relocations and define one global symbol each. They are unchanged by the
+rebase of this patch series onto Lean v4.35.0.
 
 | object | symbol | generator (catcrypt-compiler) | sha256 |
 |---|---|---|---|
@@ -22,10 +26,16 @@ relocations and define one global symbol each.
 | `mpn_mul_basecase_rt_owned.o` | `mpn_mul_basecase_rt` | `MpnRuntimeBytesEmit` | `3904b98a72300d7170466cbf96f1ac677cc8a338c70d53ed8959b760b18a7f90` |
 
 Generator modules live under `CatCrypt/Crypto/SecureCompilation/X86Backend/` in
-catcrypt-compiler (commit `912f105` for `MpnRuntimeBytesEmit`). The objects are
-byte-identical to `crates/catcrypt-mpn/obj/` in the CatCrypt development
-(commit `d9715b317`), where `emit_rt_objs.lean` and `MpnLoopBytesEmit.emitMain`
-write them.
+catcrypt-compiler (commit `912f105` for `MpnRuntimeBytesEmit`).
+`MpnLoopBytesEmit.emitMain` writes the five equal-length loops and
+`MpnRuntimeBytesEmit.emitTo <dir>` the three runtime-trip kernels; both fail
+rather than write an object when a kernel lies outside the encoder's fragment.
+The SHA-256 column identifies the objects linked here.
 
 The kernels use BMI2 (`mulx`, `shlx`, `shrx`) and write below their adjusted
 stack pointer, inside the System V red zone.
+
+`src/runtime/catcrypt/harness` holds a differential test of `src/runtime/mpn.cpp`
+and `src/runtime/mpz.cpp` with these objects against upstream's v4.35.0
+versions of the two files; `make -C src/runtime/catcrypt/harness check` runs it
+(details in `src/runtime/CATCRYPT_MPN_TCB.md`, "Testing").
