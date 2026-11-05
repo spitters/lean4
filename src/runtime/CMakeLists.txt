@@ -113,6 +113,15 @@ if(USE_MIMALLOC)
   target_link_libraries(leanrt_initial-exec PRIVATE mimalloc_initial-exec)
   target_link_libraries(leanrt PRIVATE mimalloc_local-exec)
 endif()
+
+# CATCRYPT VERIFIED MPN: targets that link leanrt through CMake also link the
+# kernel archive (src/CMakeLists.txt adds it to the toolchain's link flags).
+if(CATCRYPT_MPN)
+  add_library(catcrypt_mpn STATIC IMPORTED GLOBAL)
+  set_target_properties(catcrypt_mpn PROPERTIES IMPORTED_LOCATION "${CMAKE_BINARY_DIR}/lib/lean/libcatcrypt_mpn.a")
+  target_link_libraries(leanrt INTERFACE catcrypt_mpn)
+  target_link_libraries(leanrt_initial-exec INTERFACE catcrypt_mpn)
+endif()
 # We do not export Lean symbols when statically linking on Windows.
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
   target_compile_options(leanrt PRIVATE -ULEAN_EXPORTING)

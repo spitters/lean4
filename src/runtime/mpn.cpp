@@ -17,11 +17,24 @@ Revision History:
 
 --*/
 #include <stdint.h>
+#include <string.h>
 #include "runtime/mpn.h"
 #include "runtime/debug.h"
 #include "runtime/buffer.h"
 
 #define max(a,b)    (((a) > (b)) ? (a) : (b))
+
+#ifdef LEAN_CATCRYPT_MPN
+// CATCRYPT VERIFIED MPN: equal-length u32 add/sub entry points of the
+// catcrypt-mpn archive (see CATCRYPT_MPN_TCB.md). Only add/sub are wired here;
+// mul/compare/div/to_string keep the code below.
+extern "C" {
+    void mpn_add_n_oc_32(unsigned int *op, const unsigned int *ap,
+                         const unsigned int *bp, uint64_t n);
+    void mpn_sub_n_oc_32(unsigned int *op, const unsigned int *ap,
+                         const unsigned int *bp, uint64_t n);
+}
+#endif
 
 namespace lean {
 
@@ -29,6 +42,12 @@ typedef uint64_t mpn_double_digit;
 static_assert(sizeof(mpn_double_digit) == 2 * sizeof(mpn_digit), "size alignment");
 
 static const mpn_digit zero = 0;
+
+#ifdef LEAN_CATCRYPT_MPN
+// Zero-extension scratch: on the stack up to this many limbs, on the heap above.
+#define CATCRYPT_MPN_STACK_LIMBS 1024
+typedef buffer<mpn_digit, CATCRYPT_MPN_STACK_LIMBS> catcrypt_mpn_scratch;
+#endif
 
 int mpn_compare(mpn_digit const * a, size_t const lnga,
                 mpn_digit const * b, size_t const lngb) {
@@ -46,6 +65,43 @@ int mpn_compare(mpn_digit const * a, size_t const lnga,
     return res;
 }
 
+#ifdef LEAN_CATCRYPT_MPN
+// mpn_add and mpn_sub zero-extend both operands to len+1 limbs and call the
+// equal-length kernel, which leaves the carry (borrow) in the top limb.
+void  mpn_add(mpn_digit const * a, size_t const lnga,
+              mpn_digit const * b, size_t const lngb,
+              mpn_digit * c, size_t const lngc_alloc,
+              size_t * plngc) {
+    size_t len = max(lnga, lngb);
+    lean_assert(lngc_alloc == len+1 && len > 0);
+    size_t ext = len + 1;
+    catcrypt_mpn_scratch ea, eb;
+    ea.resize(ext, 0);
+    eb.resize(ext, 0);
+    for (size_t i = 0; i < lnga; i++) ea[i] = a[i];
+    for (size_t i = 0; i < lngb; i++) eb[i] = b[i];
+    mpn_add_n_oc_32(c, ea.data(), eb.data(), (uint64_t)ext);
+    size_t &os = *plngc;
+    for (os = ext; os > 1 && c[os-1] == 0; ) os--;
+    lean_assert(os > 0 && os <= ext);
+}
+
+void mpn_sub(mpn_digit const * a, size_t const lnga,
+             mpn_digit const * b, size_t const lngb,
+             mpn_digit * c, mpn_digit * pborrow) {
+    size_t len = max(lnga, lngb);
+    size_t ext = len + 1;
+    catcrypt_mpn_scratch ea, eb, res;
+    ea.resize(ext, 0);
+    eb.resize(ext, 0);
+    res.resize(ext, 0);
+    for (size_t i = 0; i < lnga; i++) ea[i] = a[i];
+    for (size_t i = 0; i < lngb; i++) eb[i] = b[i];
+    mpn_sub_n_oc_32(res.data(), ea.data(), eb.data(), (uint64_t)ext);
+    memcpy(c, res.data(), len * sizeof(mpn_digit));
+    *pborrow = (res[len] != 0) ? (mpn_digit)1 : (mpn_digit)0;
+}
+#else
 void  mpn_add(mpn_digit const * a, size_t const lnga,
               mpn_digit const * b, size_t const lngb,
               mpn_digit * c, size_t const lngc_alloc,
@@ -85,6 +141,7 @@ void mpn_sub(mpn_digit const * a, size_t const lnga,
         k = c1 | c2;
     }
 }
+#endif
 
 void mpn_mul(mpn_digit const * a, size_t const lnga,
              mpn_digit const * b, size_t const lngb,

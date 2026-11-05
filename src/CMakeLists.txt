@@ -107,6 +107,8 @@ option(MMAP "MMAP" ON)
 option(RUNTIME_STATS "RUNTIME_STATS" OFF)
 option(BSYMBOLIC "Link with -Bsymbolic to reduce call overhead in shared libraries (Linux)" ON)
 option(USE_GMP "USE_GMP" ON)
+option(CATCRYPT_MPN "Route the built-in bignum add/sub (USE_GMP=OFF) through the CatCrypt verified mpn kernels" OFF)
+set(CATCRYPT_MPN_LIB "" CACHE PATH "Directory holding libcatcrypt_mpn.a (required when CATCRYPT_MPN is ON)")
 # GMP versions before 6.3.0 contain bugs that can make Lean produce unsound results.
 # When ON, build against whatever GMP is available even if it is older than 6.3.0.
 option(FORCE_GMP "Build against the available GMP even if older than the required 6.3.0" OFF)
@@ -350,6 +352,25 @@ if(USE_GMP MATCHES "ON")
   endif()
 endif()
 
+# CatCrypt verified mpn kernels: see runtime/CATCRYPT_MPN_TCB.md.
+if(CATCRYPT_MPN)
+  if(USE_GMP)
+    message(FATAL_ERROR "CATCRYPT_MPN=ON replaces the built-in bignum add/sub and requires USE_GMP=OFF.")
+  endif()
+  if(CATCRYPT_MPN_LIB STREQUAL "")
+    message(FATAL_ERROR
+      "CATCRYPT_MPN=ON requires -DCATCRYPT_MPN_LIB=<dir>, the directory holding libcatcrypt_mpn.a, "
+      "built by `cargo build --release --no-default-features` in crates/catcrypt-mpn of "
+      "https://github.com/spitters/catcrypt-compiler (output: target/release).")
+  endif()
+  if(NOT EXISTS "${CATCRYPT_MPN_LIB}/libcatcrypt_mpn.a")
+    message(FATAL_ERROR "CATCRYPT_MPN_LIB=${CATCRYPT_MPN_LIB} does not contain libcatcrypt_mpn.a.")
+  endif()
+  set(CMAKE_CXX_FLAGS "-D LEAN_CATCRYPT_MPN ${CMAKE_CXX_FLAGS}")
+  # The toolchain links `-lcatcrypt_mpn` from lib/lean, like libleanrt.a.
+  configure_file("${CATCRYPT_MPN_LIB}/libcatcrypt_mpn.a" "${CMAKE_BINARY_DIR}/lib/lean/libcatcrypt_mpn.a" COPYONLY)
+endif()
+
 # LibUV
 if(CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   # Only on WebAssembly we compile LibUV ourselves
@@ -528,6 +549,10 @@ else()
     APPEND TOOLCHAIN_STATIC_LINKER_FLAGS
     " -Wl,--start-group -lleancpp -lLean -Wl,--end-group -lStd -Wl,--start-group -lInit -lleanrt -Wl,--end-group"
   )
+endif()
+if(CATCRYPT_MPN)
+  string(APPEND TOOLCHAIN_STATIC_LINKER_FLAGS " -lcatcrypt_mpn")
+  string(APPEND LEANSHARED_LINKER_FLAGS " -lcatcrypt_mpn")
 endif()
 
 set(LEAN_CXX_STDLIB "-lstdc++" CACHE STRING "C++ stdlib linker flags")

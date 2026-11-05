@@ -36,6 +36,23 @@ foreach(var ${vars})
   endif()
 endforeach()
 
+# Checked here as well as in src/ so that a missing archive fails at configure time,
+# not when stage1 is configured after stage0 has been built.
+if(CATCRYPT_MPN)
+  if(NOT DEFINED USE_GMP OR USE_GMP)
+    message(FATAL_ERROR "CATCRYPT_MPN=ON replaces the built-in bignum add/sub and requires -DUSE_GMP=OFF.")
+  endif()
+  if(NOT CATCRYPT_MPN_LIB)
+    message(FATAL_ERROR
+      "CATCRYPT_MPN=ON requires -DCATCRYPT_MPN_LIB=<dir>, the directory holding libcatcrypt_mpn.a, "
+      "built by `cargo build --release --no-default-features` in crates/catcrypt-mpn of "
+      "https://github.com/spitters/catcrypt-compiler (output: target/release).")
+  endif()
+  if(NOT EXISTS "${CATCRYPT_MPN_LIB}/libcatcrypt_mpn.a")
+    message(FATAL_ERROR "CATCRYPT_MPN_LIB=${CATCRYPT_MPN_LIB} does not contain libcatcrypt_mpn.a.")
+  endif()
+endif()
+
 project(LEAN CXX C)
 
 if(NOT (DEFINED STAGE0_CMAKE_EXECUTABLE_SUFFIX))
